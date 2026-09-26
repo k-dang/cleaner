@@ -193,6 +193,7 @@ fn high_contrast_on() -> bool {
         cbSize: size_of::<HIGHCONTRASTW>() as u32,
         ..Default::default()
     };
+    // SAFETY: `info` is a correctly sized HIGHCONTRASTW that outlives the call.
     let ok = unsafe {
         SystemParametersInfoW(
             SPI_GETHIGHCONTRAST,
@@ -206,6 +207,7 @@ fn high_contrast_on() -> bool {
 
 fn sys_color(index: SYS_COLOR_INDEX) -> Hsla {
     // COLORREF is 0x00BBGGRR.
+    // SAFETY: GetSysColor takes a plain index and has no pointer arguments.
     let c = unsafe { GetSysColor(index) };
     let [r, g, b] = [c & 0xff, (c >> 8) & 0xff, (c >> 16) & 0xff];
     rgb((r << 16) | (g << 8) | b).into()

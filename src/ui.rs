@@ -68,6 +68,7 @@ fn fit_window(window: &Window, content: Size<Pixels>) {
     };
     let hwnd = HWND(handle.hwnd.get() as *mut _);
     let scale = window.scale_factor();
+    // SAFETY: `hwnd` is this window's live handle, and every out-pointer refers to a local.
     unsafe {
         let mut frame = RECT {
             right: (f32::from(content.width) * scale).round() as i32,

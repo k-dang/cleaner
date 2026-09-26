@@ -30,6 +30,12 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# CI runs Clippy with `-D warnings`, so these fail the build there.
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+
 [build-dependencies]
 embed-resource = "3.0"
 

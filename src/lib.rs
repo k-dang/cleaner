@@ -54,6 +54,7 @@ pub fn run() {
 
 /// Reports a fatal error, such as unsupported graphics or a panic, since the app has no console.
 fn show_error(text: &str) {
+    // SAFETY: both strings are valid, null-terminated HSTRINGs that outlive the call.
     unsafe {
         MessageBoxW(
             None,
