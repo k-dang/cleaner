@@ -1,15 +1,15 @@
 # cc-cleaner-at-home
 
-A personal, offline Windows desktop app that frees disk space by deleting junk files. It is a simple, trustworthy replacement for CCleaner: it only removes files nobody needs to keep, and never touches user data such as cookies or history.
+A personal, offline Windows desktop app for reviewing and permanently deleting selected caches and discarded files. Cookies, history, saved sessions, passwords, and form data are excluded.
 
 ## Language
 
 **Target**:
-A known location whose contents nobody needs to keep, so deleting them permanently is safe. Either the owner rebuilds them on demand (caches), or they were already discarded (Recycle Bin, crash dumps, old logs).
+A built-in cleanup choice with a defined set of eligible caches or discarded files and a verified cleanup procedure. Being a cache does not by itself establish that arbitrary deletion is safe.
 _Avoid_: Rule, cleaner, location
 
 **Minimum age**:
-The age a file in a Target must reach before a Clean deletes it. Only temp Targets have one (24 hours), because apps write to them while they run.
+The time since a file's last modification that must pass before it is eligible for a Clean. It reduces the chance of deleting active working files but does not prove that a file is unused.
 _Avoid_: Threshold, retention
 
 **Category**:
@@ -17,17 +17,17 @@ A heading that groups related Targets in the checklist, such as Windows, Browser
 _Avoid_: Group, section, tab
 
 **Default selection**:
-Whether a Target is ticked the first time the app runs. Targets that are costly to rebuild (such as developer package caches) are unticked by default.
+Whether a Target is ticked when no choice has been saved for it. Targets that are costly to rebuild, such as developer and shader caches, are unticked by default.
 _Avoid_: Recommended, preset
 
 **Selection**:
-The set of Targets the user has ticked. It is remembered between runs.
+The set of Targets the user has ticked. Explicit ticks and unticks are remembered between runs, and each Clean uses the Selection captured when it starts.
 _Avoid_: Profile, settings, config
 
 **Scan**:
-Measuring how much space each Target currently uses, without changing anything. It starts when the app opens.
+Estimating the size of eligible content in each Target without changing it. The estimate can differ from a later Clean result or the disk space actually reclaimed.
 _Avoid_: Analyze, check
 
 **Clean**:
-Permanently deleting the contents of the Targets in the Selection. Files that are in use are skipped and counted, never forced.
+Attempting permanent deletion of eligible content in the captured Selection using each Target's verified procedure. It reports completed work and failures without forcing deletion or guaranteeing that running apps are unaffected.
 _Avoid_: Wipe, purge, run
