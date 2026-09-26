@@ -4,7 +4,8 @@
     <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
         <security>
             <requestedPrivileges>
-                <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+                <!-- build.rs fills in requireAdministrator for release builds and asInvoker otherwise. -->
+                <requestedExecutionLevel level="{{EXECUTION_LEVEL}}" uiAccess="false"/>
             </requestedPrivileges>
         </security>
     </trustInfo>

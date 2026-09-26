@@ -10,7 +10,7 @@ This record covers issue 01: the portable GPUI app with fixture data. Rerun thes
 | Toolchain | Rust 1.98.1, `x86_64-pc-windows-msvc`, pinned in `rust-toolchain.toml` |
 | Lockfile | `Cargo.lock` pins every dependency. Commit it with the source. |
 | C runtime | Linked statically (`.cargo/config.toml`) |
-| Manifest | `resources/app.manifest`: `requireAdministrator`, PerMonitorV2 DPI awareness, Common Controls 6, `supportedOS` for Windows 10 and later (the GUID Windows 11 also uses) |
+| Manifest | `resources/app.manifest`: `requireAdministrator` in release builds and `asInvoker` in debug builds, PerMonitorV2 DPI awareness, Common Controls 6, `supportedOS` for Windows 10 and later (the GUID Windows 11 also uses) |
 | Release size | About 7 MB, one file |
 
 GPUI's own `windows-manifest` feature is off, because it embeds a second manifest that cannot require elevation. `resources/app.manifest` carries GPUI's DPI and Common Controls settings instead.
@@ -19,7 +19,8 @@ GPUI's own `windows-manifest` feature is off, because it embeds a second manifes
 
 - Release builds compile HLSL shaders with `fxc.exe` from the Windows SDK. GPUI looks in `PATH`, then `C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\`. Set `GPUI_FXC_PATH` to use another location.
 - `cargo build --release` produces `target\release\cc-cleaner.exe`.
-- `cargo run` fails with OS error 740, because the manifest requires elevation. Start the executable through the shell instead, for example `Start-Process target\debug\cc-cleaner.exe`.
+- `cargo run` starts a debug build as the current user. Debug builds do not ask for elevation, so system Targets report access errors unless the terminal runs as administrator.
+- Release builds require elevation, so start them through the shell, for example `Start-Process targetelease\cc-cleaner.exe`. `cargo run --release` fails with OS error 740 unless the terminal runs as administrator.
 - Tests live in the library crate, whose test binary carries no manifest. `cargo test` runs unelevated.
 
 ## Graphics requirements
