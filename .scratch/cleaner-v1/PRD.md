@@ -1,4 +1,4 @@
-Status: draft - Target validation and GPUI packaging checks required before implementation readiness
+Status: draft - Target validation required before implementation readiness
 
 # Spec: cc-cleaner-at-home v1
 
@@ -44,10 +44,10 @@ Each Target has a verified cleanup procedure. Cache files can be needed by runni
 
 ### Platform and delivery
 
-- Windows 10 and 11, x64, for Kevin's local administrator account. The filesystem and privilege behavior is Windows-specific.
+- Windows 11, x64, for Kevin's local administrator account. The filesystem and privilege behavior is Windows-specific.
 - Rust with [GPUI](https://gpui.rs/) for the UI. GPUI provides Windows windowing and GPU rendering without an embedded browser runtime. Use the `windows` crate for filesystem, elevation, and shell operations. Keep the application in one executable with embedded UI assets.
 - Pin GPUI and its companion crates to a tested, compatible release or exact Git revision and commit `Cargo.lock`. GPUI is pre-1.0 and can introduce breaking changes; dependency updates require rerunning the UI and packaging checks. [GPUI documentation](https://github.com/zed-industries/zed/blob/main/crates/gpui/README.md).
-- Validate the selected GPUI revision's graphics requirements on Windows 10 and 11, including the disposable VM used for acceptance tests. GPU rendering must work in that environment before destructive testing begins. [Windows rendering implementation](https://github.com/zed-industries/zed/blob/main/crates/gpui_windows/src/window.rs).
+- Validate the selected GPUI revision's graphics requirements on Windows 11. [Windows rendering implementation](https://github.com/zed-industries/zed/blob/main/crates/gpui_windows/src/window.rs).
 - Statically link application runtime dependencies where required for the portable build; depend only on supported Windows system libraries at run time.
 - The manifest uses `requireAdministrator`. Support consent elevation of Kevin's own account. Launch under another account is unsupported. Elevation does not guarantee access to every file and does not justify bypassing permissions.
 - The executable and its dependencies must initiate no network traffic, including telemetry, crash uploads, update checks, and runtime downloads. This requirement does not claim to control unrelated Windows services. Verify the shipped build's traffic, including startup and failures.
@@ -162,7 +162,7 @@ Both named shader Targets are unticked. Browser and app cache validation must ac
 
 - Build the screen with GPUI's layout and rendering primitives and Windows-style controls. The app owns the controls' appearance, interaction, and accessibility behavior. Implement only the controls needed by this screen.
 - One fixed-size window, approximately 520 by 640 device-independent pixels. Scale controls and text with Windows DPI and text settings; keep them usable without clipping.
-- Follow Windows light, dark, and high-contrast preferences, including changes while the window is open. Use Segoe UI Variable where available, with Segoe UI fallback. Implement Tab and Shift+Tab navigation, Space to toggle focused checkboxes, standard button activation, and visible focus. Expose control names, roles, checked/disabled states, and result updates to Windows accessibility tools.
+- Follow Windows light, dark, and high-contrast preferences, including changes while the window is open. Use Segoe UI Variable. Implement Tab and Shift+Tab navigation, Space to toggle focused checkboxes, standard button activation, and visible focus. Expose control names, roles, checked/disabled states, and result updates to Windows accessibility tools.
 - Top: estimated total eligible size and Rescan. Clearly distinguish a running or incomplete Scan from a complete total.
 - Middle: a scrolling checklist with Category headings and Target rows. Hide empty Categories. Show size estimates, reasons for incomplete results, and operation progress in the affected rows.
 - Bottom: `Clean approximately 1.2 GB`, or `Clean` when the complete estimate is zero, and the persistent last result line. Explain the difference between deleted file sizes and reclaimed disk space in concise supporting text.
@@ -173,8 +173,8 @@ Both named shader Targets are unticked. Browser and app cache validation must ac
 
 ### Initial GPUI check
 
-- Before connecting deletion, build a release executable with the real window layout, a scrolling fixture checklist, selection controls, and simulated progress and results. Verify keyboard navigation, Windows Narrator, theme changes, and DPI/text scaling. Use this screen as the app UI after validation; do not maintain a separate demo or UI framework.
-- On Windows 10 and 11, verify launch with the elevation manifest, graphics initialization on the test machine and VM, and execution from a copied single executable without development tools or separately installed application runtimes. Embed all required assets and inspect attempted network traffic. Record the tested GPUI revision and graphics requirements; resolve failures before enabling cleanup.
+- Before connecting deletion, build a release executable with the real window layout, a scrolling fixture checklist, selection controls, and simulated progress and results. Verify keyboard navigation, the UI Automation tree, theme changes, and text scaling. Use this screen as the app UI after validation; do not maintain a separate demo or UI framework.
+- On Windows 11, verify launch with the elevation manifest, graphics initialization on the test machine, and execution from a copied single executable without development tools or separately installed application runtimes. Embed all required assets and inspect attempted network traffic. Record the tested GPUI revision and graphics requirements; resolve failures before enabling cleanup.
 
 ### Focused automated checks
 
@@ -193,8 +193,8 @@ Both named shader Targets are unticked. Browser and app cache validation must ac
 - Run the real packaged executable first in a disposable Windows account or VM with seeded Target content, protected sentinel files, and a disposable Recycle Bin. Do not use Kevin's live caches as the first destructive test.
 - Exercise launch/elevation, progressive Scan, Selection persistence, a slow unticked Target, Clean, partial failures, automatic rescan, close during cleanup, and restart. Verify the files that remain as well as the UI results.
 - Verify retained Targets' owning apps still work and rebuild their caches after cleanup and interruption. Record the owner versions and evidence with the corresponding Target definitions. Any failing Target must be removed or have its cleanup corrected before it ships.
-- Check the portable executable offline on Windows 10 and 11 without development tools or separately installed application runtimes. Inspect process network activity during launch, Scan, Clean, and error paths; an unplugged-network test alone does not prove absence of attempted traffic.
-- Inspect light, dark, high-contrast, keyboard focus, scrolling, and DPI/text scaling, including changes while the window is open. Verify with Windows Narrator that checkbox states, disabled controls, and result updates are exposed correctly. Verify the total, action controls, error text, and last result remain readable.
+- Check the portable executable offline on Windows 11 without development tools or separately installed application runtimes. Inspect process network activity during launch, Scan, Clean, and error paths; an unplugged-network test alone does not prove absence of attempted traffic.
+- Inspect light, dark, high-contrast, keyboard focus, scrolling, and text scaling, including changes while the window is open. Verify that the UI Automation tree exposes checkbox states, disabled controls, and result updates correctly. Verify the total, action controls, error text, and last result remain readable.
 - Only after isolated acceptance passes, repeat the intended review-and-Clean flow on Kevin's machine with an explicitly reviewed Selection.
 
 ## Out of scope

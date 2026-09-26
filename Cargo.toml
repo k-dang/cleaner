@@ -1,0 +1,43 @@
+[package]
+name = "cc-cleaner-at-home"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "cleaner"
+doctest = false
+
+[[bin]]
+name = "cc-cleaner"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+# GPUI is pre-1.0. Keep every zed crate on the same revision, and rerun the UI
+# and packaging checks in docs/gpui-validation.md whenever the revision changes.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "933d8d93819c749a607e561883855a9b95c79cea", default-features = false }
+gpui_windows = { git = "https://github.com/zed-industries/zed", rev = "933d8d93819c749a607e561883855a9b95c79cea", default-features = false }
+futures = "0.3"
+raw-window-handle = "0.6"
+# Same major version as gpui_windows, so both share one build.
+windows = { version = "0.62", features = [
+    "Foundation",
+    "UI_ViewManagement",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Accessibility",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+embed-resource = "3.0"
+
+# Zed patches async-task at the workspace level; git dependents do not inherit it.
+[patch.crates-io]
+async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
