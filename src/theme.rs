@@ -55,6 +55,10 @@ impl System {
     pub fn read() -> Self {
         let settings = UISettings::new().ok();
         let color = |kind| settings.as_ref().and_then(|s| s.GetColorValue(kind).ok());
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the Windows text scale is between 1.0 and 2.25"
+        )]
         let text_scale = settings
             .as_ref()
             .and_then(|s| s.TextScaleFactor().ok())
@@ -190,7 +194,7 @@ impl Theme {
 
 fn high_contrast_on() -> bool {
     let mut info = HIGHCONTRASTW {
-        cbSize: size_of::<HIGHCONTRASTW>() as u32,
+        cbSize: size_of::<HIGHCONTRASTW>().try_into().unwrap(),
         ..Default::default()
     };
     // SAFETY: `info` is a correctly sized HIGHCONTRASTW that outlives the call.

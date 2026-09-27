@@ -70,18 +70,23 @@ fn fit_window(window: &Window, content: Size<Pixels>) {
     let scale = window.scale_factor();
     // SAFETY: `hwnd` is this window's live handle, and every out-pointer refers to a local.
     unsafe {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "window sizes in device pixels are far below i32::MAX"
+        )]
         let mut frame = RECT {
             right: (f32::from(content.width) * scale).round() as i32,
             bottom: (f32::from(content.height) * scale).round() as i32,
             ..Default::default()
         };
-        let style = WINDOW_STYLE(GetWindowLongW(hwnd, GWL_STYLE) as u32);
-        let ex_style = WINDOW_EX_STYLE(GetWindowLongW(hwnd, GWL_EXSTYLE) as u32);
+        // The style values are bit flags, so reinterpret the bits.
+        let style = WINDOW_STYLE(GetWindowLongW(hwnd, GWL_STYLE).cast_unsigned());
+        let ex_style = WINDOW_EX_STYLE(GetWindowLongW(hwnd, GWL_EXSTYLE).cast_unsigned());
         let _ = AdjustWindowRectExForDpi(&mut frame, style, false, ex_style, GetDpiForWindow(hwnd));
         let mut current = RECT::default();
         let _ = GetWindowRect(hwnd, &mut current);
         let mut monitor = MONITORINFO {
-            cbSize: size_of::<MONITORINFO>() as u32,
+            cbSize: size_of::<MONITORINFO>().try_into().unwrap(),
             ..Default::default()
         };
         let _ = GetMonitorInfoW(

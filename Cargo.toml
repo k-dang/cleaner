@@ -32,6 +32,10 @@ windows = { version = "0.62", features = [
 
 # CI runs Clippy with `-D warnings`, so these fail the build there.
 [lints.clippy]
+# Byte counts must stay exact, so flag `as` casts that can truncate or change sign.
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
 dbg_macro = "warn"
 todo = "warn"
 undocumented_unsafe_blocks = "warn"
