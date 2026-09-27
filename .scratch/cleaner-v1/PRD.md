@@ -190,6 +190,8 @@ Both named shader Targets are unticked. Browser and app cache validation must ac
 
 ### End-to-end acceptance
 
+For issue 02, Kevin waived the isolated packaged Clean test and concurrent owner-behavior check as prerequisites for enabling Clean on 2026-09-27. These checks remain unperformed; the issue records the exception.
+
 - Run the real packaged executable first in a disposable Windows account or VM with seeded Target content, protected sentinel files, and a disposable Recycle Bin. Do not use Kevin's live caches as the first destructive test.
 - Exercise launch/elevation, progressive Scan, Selection persistence, a slow unticked Target, Clean, partial failures, automatic rescan, close during cleanup, and restart. Verify the files that remain as well as the UI results.
 - Verify retained Targets' owning apps still work and rebuild their caches after cleanup and interruption. Record the owner versions and evidence with the corresponding Target definitions. Any failing Target must be removed or have its cleanup corrected before it ships.

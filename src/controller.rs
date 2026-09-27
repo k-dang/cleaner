@@ -82,12 +82,11 @@ pub struct Controller {
     clean_results: Vec<(&'static Target, CleanResult)>,
     last_clean: Option<Vec<(&'static Target, CleanResult)>>,
     selection_saved: bool,
-    clean_validated: bool,
     closing: bool,
 }
 
 impl Controller {
-    pub fn new(is_selected: impl Fn(&Target) -> bool, clean_validated: bool) -> Self {
+    pub fn new(is_selected: impl Fn(&Target) -> bool) -> Self {
         let rows = TARGETS
             .iter()
             .map(|target| Row {
@@ -105,7 +104,6 @@ impl Controller {
             clean_results: Vec::new(),
             last_clean: None,
             selection_saved: true,
-            clean_validated,
             closing: false,
         }
     }
@@ -220,8 +218,7 @@ impl Controller {
     /// True when every selected, present Target has a complete estimate, at least
     /// one exists, and no Clean is running or pending.
     pub fn can_clean(&self) -> bool {
-        if !self.clean_validated || self.selection_locked() || !self.selection_saved || self.closing
-        {
+        if self.selection_locked() || !self.selection_saved || self.closing {
             return false;
         }
         let mut any_complete = false;
@@ -301,10 +298,6 @@ impl Controller {
         self.closing
     }
 
-    pub fn clean_validated(&self) -> bool {
-        self.clean_validated
-    }
-
     /// Per-Target results of the latest finished Clean, in Clean order.
     pub fn last_clean(&self) -> Option<&[(&'static Target, CleanResult)]> {
         self.last_clean.as_deref()
@@ -346,7 +339,7 @@ mod tests {
 
     #[test]
     fn selected_targets_scan_first_and_incomplete_results_block_clean() {
-        let mut controller = Controller::new(|target| target.id == "windows-temp", true);
+        let mut controller = Controller::new(|target| target.id == "windows-temp");
         let Command::Scan { op, targets } = controller.start_scan().unwrap() else {
             unreachable!()
         };
@@ -374,7 +367,7 @@ mod tests {
 
     #[test]
     fn clean_waits_for_unfinished_unticked_scan_then_rescans() {
-        let mut controller = Controller::new(|target| target.id == "user-temp", true);
+        let mut controller = Controller::new(|target| target.id == "user-temp");
         let scan = scan_op(&mut controller);
         controller.apply(
             scan,
@@ -404,7 +397,7 @@ mod tests {
 
     #[test]
     fn unsaved_selection_blocks_clean_and_close_suppresses_rescan() {
-        let mut controller = Controller::new(|_| true, true);
+        let mut controller = Controller::new(|_| true);
         let scan = scan_op(&mut controller);
         controller.apply(
             scan,
@@ -427,7 +420,7 @@ mod tests {
 
     #[test]
     fn late_results_cannot_overwrite_new_scan() {
-        let mut controller = Controller::new(|_| false, true);
+        let mut controller = Controller::new(|_| false);
         let first = scan_op(&mut controller);
         controller.apply(first, Event::Finished);
         let second = scan_op(&mut controller);
@@ -441,7 +434,7 @@ mod tests {
 
     #[test]
     fn duplicate_requests_do_not_start_another_operation() {
-        let mut controller = Controller::new(|_| true, true);
+        let mut controller = Controller::new(|_| true);
         let scan = scan_op(&mut controller);
         assert!(controller.start_scan().is_none());
         controller.apply(
@@ -462,7 +455,7 @@ mod tests {
 
     #[test]
     fn close_during_scan_cancels_pending_clean_after_worker_acknowledges_stop() {
-        let mut controller = Controller::new(|_| true, true);
+        let mut controller = Controller::new(|_| true);
         let scan = scan_op(&mut controller);
         controller.apply(
             scan,
@@ -479,7 +472,7 @@ mod tests {
 
     #[test]
     fn finished_clean_results_follow_worker_order_and_survive_rescan() {
-        let mut controller = Controller::new(|_| true, true);
+        let mut controller = Controller::new(|_| true);
         let scan = scan_op(&mut controller);
         for id in ["user-temp", "windows-temp"] {
             controller.apply(scan, Event::Scanned(id, ScanResult::Complete { bytes: 1 }));
@@ -516,17 +509,5 @@ mod tests {
         );
         controller.apply(rescan, Event::Scanned("user-temp", ScanResult::NotPresent));
         assert_eq!(controller.last_clean().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn unvalidated_clean_is_unavailable_even_when_scan_is_ready() {
-        let mut controller = Controller::new(|target| target.id == "user-temp", false);
-        let scan = scan_op(&mut controller);
-        controller.apply(
-            scan,
-            Event::Scanned("user-temp", ScanResult::Complete { bytes: 2 }),
-        );
-        assert!(!controller.can_clean());
-        assert_eq!(controller.request_clean(), None);
     }
 }

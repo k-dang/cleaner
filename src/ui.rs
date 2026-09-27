@@ -216,9 +216,7 @@ impl CleanerView {
         })
         .detach();
 
-        // Enable this only after both packaged temp procedures pass disposable
-        // Windows validation, including concurrent owner behavior.
-        let mut controller = Controller::new(|_| false, false);
+        let mut controller = Controller::new(|_| false);
         controller.set_selection_saved(false);
         let row_focus: Vec<FocusHandle> = controller
             .rows()
@@ -895,9 +893,6 @@ impl CleanerView {
         }
         if !self.pending_saves.is_empty() {
             return Some("Saving Selection...".into());
-        }
-        if !self.controller.clean_validated() {
-            return Some("Clean is unavailable until disposable Windows validation passes.".into());
         }
         let rows = self.controller.rows();
         if self.controller.selection_locked() {

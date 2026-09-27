@@ -8,7 +8,7 @@ The live worker supports User temp and Windows temp only. It scans files last mo
 
 The app saves explicit ticks and unticks in `%APPDATA%\cc-cleaner-at-home\selection.json`. A malformed or unreadable Selection starts with both Targets unticked. The app shows save errors and rolls back a failed change.
 
-The core and controller pass disposable-folder checks. The Clean button remains disabled because this release has not passed the PRD's first destructive packaged test in a disposable Windows account or VM. Enable Clean only after that test and concurrent owner-behavior validation pass.
+Clean is enabled. The core and controller passed disposable-folder checks, but the packaged app has not passed a destructive end-to-end test in an isolated Windows installation or concurrent owner-behavior validation. Kevin explicitly waived those checks as a prerequisite for enabling Clean on 2026-09-27.
 
 ## Build and run
 
