@@ -26,14 +26,14 @@ pub fn size(bytes: u64) -> String {
 /// The one-line summary of a finished Clean, e.g.
 /// `Deleted 1.2 GB of files · 4 files skipped (sharing violation)`.
 pub fn clean_summary(results: &[(&Target, CleanResult)]) -> String {
-    let mut deleted = 0;
+    let mut deleted = None;
     let mut skipped: Vec<(Problem, u64)> = Vec::new();
     let mut unavailable = Vec::new();
     let mut incomplete: Vec<(Problem, u64)> = Vec::new();
     let mut stopped = 0;
     for (target, result) in results {
         match result.deleted_bytes {
-            Some(bytes) => deleted += bytes,
+            Some(bytes) => *deleted.get_or_insert(0) += bytes,
             None if result.status == CleanStatus::Complete => {
                 unavailable.push(format!("{} emptied (size unavailable)", target.name));
             }
@@ -49,7 +49,10 @@ pub fn clean_summary(results: &[(&Target, CleanResult)]) -> String {
         }
     }
 
-    let mut parts = vec![format!("Deleted {} of files", size(deleted))];
+    let mut parts = Vec::new();
+    if let Some(bytes) = deleted {
+        parts.push(format!("Deleted {} of files", size(bytes)));
+    }
     for (problem, count) in skipped {
         parts.push(format!(
             "{} skipped ({})",
@@ -129,6 +132,24 @@ mod tests {
                 (target("recycle-bin"), result(CleanStatus::Complete, None)),
             ]),
             "Deleted 1.2 GB of files · Recycle Bin emptied (size unavailable)"
+        );
+    }
+
+    #[test]
+    fn summary_omits_deleted_total_when_only_recycle_bin_was_cleaned() {
+        let mut fixture = crate::fixture::Fixture::default();
+        let cleaned = fixture.clean("recycle-bin", 1434 * MB).1;
+        assert_eq!(
+            clean_summary(&[(target("recycle-bin"), cleaned)]),
+            "Recycle Bin emptied (size unavailable)"
+        );
+    }
+
+    #[test]
+    fn summary_keeps_a_known_zero_deleted_total() {
+        assert_eq!(
+            clean_summary(&[(target("pnpm-store"), result(CleanStatus::Complete, Some(0)))]),
+            "Deleted 0 bytes of files"
         );
     }
 

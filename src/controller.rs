@@ -237,6 +237,9 @@ impl Controller {
             .filter(|row| row.selected && matches!(row.scan, Some(ScanResult::Complete { .. })))
             .map(|row| row.target.id)
             .collect();
+        for row in &mut self.rows {
+            row.clean = None;
+        }
         match self.operation {
             Operation::Scanning(scan) => {
                 self.pending_clean = Some(targets);
@@ -526,6 +529,51 @@ mod tests {
             Some(CleanProgress::Done(done(10)))
         );
         assert!(!c.can_clean(), "the fresh Scan has not reported yet");
+    }
+
+    #[test]
+    fn a_new_clean_clears_previous_row_results_before_stopping_the_rescan() {
+        let mut c = selecting(&["user-temp", "pnpm-store"]);
+        let mut fixture = crate::fixture::Fixture::default();
+        let scan = scan_op(&mut c);
+        for id in ["user-temp", "pnpm-store"] {
+            c.apply(scan, Event::Scanned(id, fixture.scan(id).1));
+        }
+        c.apply(scan, Event::Finished);
+        let Some(Command::Clean { op, targets }) = c.request_clean() else {
+            panic!("expected a Clean");
+        };
+        for id in targets {
+            c.apply(op, Event::Cleaning(id));
+            let result = fixture.clean(id, c.estimate(id).unwrap()).1;
+            c.apply(op, Event::Cleaned(id, result));
+        }
+        let Some(Command::Scan { op: rescan, .. }) = c.apply(op, Event::Finished) else {
+            panic!("expected the automatic rescan");
+        };
+        c.apply(
+            rescan,
+            Event::Scanned("user-temp", fixture.scan("user-temp").1),
+        );
+        assert!(c.toggle("pnpm-store"));
+
+        assert_eq!(c.request_clean(), Some(Command::Stop(rescan)));
+        assert!(c.rows().iter().all(|row| row.clean.is_none()));
+
+        let Some(Command::Clean { op, targets }) = c.apply(rescan, Event::Finished) else {
+            panic!("expected the next Clean");
+        };
+        assert_eq!(targets, ["user-temp"]);
+        assert_eq!(clean_progress(&c, "user-temp"), Some(CleanProgress::Queued));
+        assert_eq!(clean_progress(&c, "pnpm-store"), None);
+        assert_eq!(c.rows().iter().filter(|row| row.clean.is_some()).count(), 1);
+
+        let result = fixture
+            .clean("user-temp", c.estimate("user-temp").unwrap())
+            .1;
+        c.apply(op, Event::Cleaned("user-temp", result.clone()));
+        c.apply(op, Event::Finished);
+        assert_eq!(c.last_clean(), Some(&[(&TARGETS[0], result)][..]));
     }
 
     #[test]
