@@ -2,17 +2,20 @@
 //! scrolling checklist in the middle, and Clean with the last result at the
 //! bottom. It renders controller state and forwards user actions.
 
-use std::cell::Cell;
+use std::collections::VecDeque;
 use std::rc::Rc;
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Sender;
+use std::time::SystemTime;
 
 use futures::StreamExt;
 use gpui::{
     AccessibleAction, AnyElement, App, AppContext, ClickEvent, Context, Div, FocusHandle,
     FontWeight, Hsla, InteractiveElement, IntoElement, KeyboardButton, KeyboardClickEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Render, Role, ScrollHandle,
-    Size, Stateful, StatefulInteractiveElement, Styled, Subscription, Task, Toggled, Window,
-    accesskit, actions, div, point, prelude::FluentBuilder, px, rems, size,
+    Size, Stateful, StatefulInteractiveElement, Styled, Subscription, Toggled, Window, accesskit,
+    actions, div, point, prelude::FluentBuilder, px, rems, size,
 };
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -27,10 +30,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::controller::{CleanProgress, Command, Controller, Event, OpId, Operation, Row};
-use crate::fixture::Fixture;
+use crate::core::{self, Roots};
 use crate::format;
 use crate::results::{CleanStatus, ScanResult};
-use crate::targets::{Category, TargetId};
+use crate::selection::{self, Choices, SelectionStore};
+use crate::targets::TargetId;
 use crate::theme::{self, System, Theme};
 
 actions!(cleaner, [FocusNext, FocusPrev]);
@@ -110,16 +114,39 @@ fn fit_window(window: &Window, content: Size<Pixels>) {
     }
 }
 
-/// The running operation's fixture task and its stop signal.
+/// The running filesystem worker and its stop signal.
 struct Worker {
     op: OpId,
-    stop: Rc<Cell<bool>>,
-    _task: Task<()>,
+    stop: Arc<AtomicBool>,
+}
+
+struct SaveRequest {
+    sequence: u64,
+    choices: Choices,
+}
+
+struct PendingSave {
+    sequence: u64,
+    choices: Choices,
+    initial: bool,
+}
+
+enum SelectionEvent {
+    Loaded(Result<selection::Loaded, String>),
+    Saved {
+        sequence: u64,
+        result: Result<(), String>,
+    },
 }
 
 pub struct CleanerView {
     controller: Controller,
-    fixture: Fixture,
+    save_tx: Sender<SaveRequest>,
+    pending_saves: VecDeque<PendingSave>,
+    next_save: u64,
+    selection_loaded: bool,
+    saved_choices: Option<Choices>,
+    selection_error: Option<String>,
     worker: Option<Worker>,
     system: System,
     root_focus: FocusHandle,
@@ -150,7 +177,49 @@ impl CleanerView {
         })
         .detach();
 
-        let controller = Controller::new(|target| target.default_selected);
+        let (save_tx, save_rx) = std::sync::mpsc::channel::<SaveRequest>();
+        let (selection_tx, mut selection_rx) = futures::channel::mpsc::unbounded();
+        std::thread::spawn(move || {
+            let store = SelectionStore::system().map_err(|error| error.to_string());
+            let loaded = store
+                .as_ref()
+                .map_err(Clone::clone)
+                .and_then(|store| store.load().map_err(|error| error.to_string()));
+            selection_tx
+                .unbounded_send(SelectionEvent::Loaded(loaded))
+                .ok();
+            for request in save_rx {
+                let result = store.as_ref().map_err(Clone::clone).and_then(|store| {
+                    store
+                        .save(&request.choices)
+                        .map_err(|error| error.to_string())
+                });
+                selection_tx
+                    .unbounded_send(SelectionEvent::Saved {
+                        sequence: request.sequence,
+                        result,
+                    })
+                    .ok();
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            while let Some(event) = selection_rx.next().await {
+                if this
+                    .update_in(cx, |view, window, cx| {
+                        view.apply_selection(event, window, cx)
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        // Enable this only after both packaged temp procedures pass disposable
+        // Windows validation, including concurrent owner behavior.
+        let mut controller = Controller::new(|_| false, false);
+        controller.set_selection_saved(false);
         let row_focus: Vec<FocusHandle> = controller
             .rows()
             .iter()
@@ -178,9 +247,14 @@ impl CleanerView {
         fit_window(window, window_size(system.text_scale));
         let root_focus = cx.focus_handle();
         window.focus(&root_focus, cx);
-        let mut view = Self {
+        let view = Self {
             controller,
-            fixture: Fixture::default(),
+            save_tx,
+            pending_saves: VecDeque::new(),
+            next_save: 0,
+            selection_loaded: false,
+            saved_choices: None,
+            selection_error: None,
             worker: None,
             system,
             root_focus,
@@ -193,8 +267,12 @@ impl CleanerView {
             _watcher: theme::watch(changed_tx).ok(),
             _subscriptions: subscriptions,
         };
-        let scan = view.controller.start_scan();
-        view.dispatch(scan, cx);
+        let entity = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |_, cx| {
+            entity
+                .update(cx, |view, cx| view.request_close(cx))
+                .unwrap_or(true)
+        });
         view
     }
 
@@ -210,13 +288,13 @@ impl CleanerView {
         cx.notify();
     }
 
-    /// Hands a controller command to the fixture worker.
+    /// Hands a controller command to the filesystem worker.
     fn dispatch(&mut self, command: Option<Command>, cx: &mut Context<Self>) {
         match command {
             None => {}
             Some(Command::Stop(op)) => {
                 if let Some(worker) = self.worker.as_ref().filter(|w| w.op == op) {
-                    worker.stop.set(true);
+                    worker.stop.store(true, Ordering::Release);
                 }
             }
             Some(Command::Scan { op, targets }) => self.start_worker(op, targets, false, cx),
@@ -224,8 +302,7 @@ impl CleanerView {
         }
     }
 
-    /// Plays fixture results for `targets` in order, one after another, and
-    /// checks the stop signal between steps.
+    /// Runs Targets sequentially on a filesystem worker thread.
     fn start_worker(
         &mut self,
         op: OpId,
@@ -233,58 +310,175 @@ impl CleanerView {
         clean: bool,
         cx: &mut Context<Self>,
     ) {
-        let stop = Rc::new(Cell::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
         let task_stop = stop.clone();
-        let task = cx.spawn(async move |this, cx| {
+        let (tx, mut updates) = futures::channel::mpsc::unbounded();
+        std::thread::spawn(move || {
+            let roots = Roots::system();
+            let time = SystemTime::now();
             for id in targets {
-                if task_stop.get() {
+                if task_stop.load(Ordering::Acquire) {
                     break;
                 }
-                let Ok((delay, event)) = this.update(cx, |view, cx| {
-                    if clean {
-                        view.apply(op, Event::Cleaning(id), cx);
-                        let estimate = view.controller.estimate(id).unwrap_or(0);
-                        let (delay, result) = view.fixture.clean(id, estimate);
-                        (delay, Event::Cleaned(id, result))
-                    } else {
-                        let (delay, result) = view.fixture.scan(id);
-                        (delay, Event::Scanned(id, result))
-                    }
-                }) else {
-                    return;
+                let event = if clean {
+                    tx.unbounded_send(Event::Cleaning(id)).ok();
+                    let result = core::clean(id, &roots, time, &task_stop);
+                    Event::Cleaned(id, result)
+                } else {
+                    let result = core::scan(id, &roots, time, &task_stop);
+                    Event::Scanned(id, result)
                 };
-                // Wait in small steps so a stop takes effect mid-Target.
-                let step = Duration::from_millis(50);
-                let mut waited = Duration::ZERO;
-                while waited < delay && !task_stop.get() {
-                    cx.background_executor().timer(step).await;
-                    waited += step;
-                }
-                if task_stop.get() {
+                tx.unbounded_send(event).ok();
+            }
+            tx.unbounded_send(Event::Finished).ok();
+        });
+        cx.spawn(async move |this, cx| {
+            while let Some(event) = updates.next().await {
+                let finished = matches!(event, Event::Finished);
+                if this
+                    .update_in(cx, |view, window, cx| view.apply(op, event, window, cx))
+                    .is_err()
+                {
                     break;
                 }
-                this.update(cx, |view, cx| view.apply(op, event, cx)).ok();
+                if finished {
+                    break;
+                }
             }
-            this.update(cx, |view, cx| view.apply(op, Event::Finished, cx))
-                .ok();
-        });
-        self.worker = Some(Worker {
-            op,
-            stop,
-            _task: task,
-        });
+        })
+        .detach();
+        self.worker = Some(Worker { op, stop });
     }
 
-    fn apply(&mut self, op: OpId, event: Event, cx: &mut Context<Self>) {
+    fn apply(&mut self, op: OpId, event: Event, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(event, Event::Finished) {
+            self.worker = None;
+        }
         let next = self.controller.apply(op, event);
         cx.notify();
         self.dispatch(next, cx);
+        if self.controller.is_closing() && self.worker.is_none() && self.pending_saves.is_empty() {
+            window.remove_window();
+        }
+    }
+
+    fn apply_selection(
+        &mut self,
+        event: SelectionEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            SelectionEvent::Loaded(Ok(loaded)) => {
+                self.selection_loaded = true;
+                self.controller.replace_selection(&loaded.choices);
+                if loaded.needs_save {
+                    self.queue_save(loaded.choices, true);
+                } else {
+                    self.saved_choices = Some(loaded.choices);
+                    self.controller.set_selection_saved(true);
+                }
+                let scan = self.controller.start_scan();
+                self.dispatch(scan, cx);
+            }
+            SelectionEvent::Loaded(Err(error)) => {
+                self.selection_loaded = true;
+                self.controller
+                    .replace_selection(&selection::none_selected());
+                self.selection_error = Some(format!("Selection could not be loaded: {error}"));
+                let scan = self.controller.start_scan();
+                self.dispatch(scan, cx);
+            }
+            SelectionEvent::Saved { sequence, result } => {
+                let Some(pending) = self.pending_saves.pop_front() else {
+                    return;
+                };
+                if pending.sequence != sequence {
+                    self.selection_error = Some("Selection saves completed out of order".into());
+                    self.controller.set_selection_saved(false);
+                    return;
+                }
+                match result {
+                    Ok(()) => {
+                        self.saved_choices = Some(pending.choices);
+                        if self.pending_saves.is_empty() {
+                            self.selection_error = None;
+                            self.controller.set_selection_saved(true);
+                        }
+                    }
+                    Err(error) => {
+                        self.selection_error =
+                            Some(format!("Selection could not be saved: {error}"));
+                        if self.pending_saves.is_empty() && !pending.initial {
+                            self.controller.replace_selection(
+                                &self
+                                    .saved_choices
+                                    .clone()
+                                    .unwrap_or_else(selection::none_selected),
+                            );
+                            self.controller
+                                .set_selection_saved(self.saved_choices.is_some());
+                        }
+                    }
+                }
+            }
+        }
+        cx.notify();
+        if self.controller.is_closing() && self.worker.is_none() && self.pending_saves.is_empty() {
+            window.remove_window();
+        }
+    }
+
+    fn queue_save(&mut self, choices: Choices, initial: bool) {
+        self.next_save += 1;
+        let sequence = self.next_save;
+        self.controller.set_selection_saved(false);
+        if self
+            .save_tx
+            .send(SaveRequest {
+                sequence,
+                choices: choices.clone(),
+            })
+            .is_ok()
+        {
+            self.pending_saves.push_back(PendingSave {
+                sequence,
+                choices,
+                initial,
+            });
+        } else {
+            self.selection_error = Some("Selection save worker stopped".into());
+            if !initial {
+                self.controller.replace_selection(
+                    &self
+                        .saved_choices
+                        .clone()
+                        .unwrap_or_else(selection::none_selected),
+                );
+                self.controller
+                    .set_selection_saved(self.saved_choices.is_some());
+            }
+        }
     }
 
     fn toggle(&mut self, id: TargetId, cx: &mut Context<Self>) {
-        if self.controller.toggle(id) {
+        if self.selection_loaded && self.controller.toggle(id) {
+            let choices: Choices = self
+                .controller
+                .rows()
+                .iter()
+                .map(|row| (row.target.id.to_string(), row.selected))
+                .collect();
+            self.queue_save(choices, false);
             cx.notify();
         }
+    }
+
+    fn request_close(&mut self, cx: &mut Context<Self>) -> bool {
+        let stop = self.controller.close();
+        self.dispatch(stop, cx);
+        cx.notify();
+        self.worker.is_none() && self.pending_saves.is_empty()
     }
 
     fn rescan(&mut self, cx: &mut Context<Self>) {
@@ -320,7 +514,9 @@ impl CleanerView {
         } else {
             "Scan complete".to_string()
         };
-        let idle = self.controller.operation() == Operation::Idle;
+        let idle = self.selection_loaded
+            && self.controller.operation() == Operation::Idle
+            && !self.controller.is_closing();
         let scrolled = self.list.offset().y < px(0.);
 
         div()
@@ -375,27 +571,24 @@ impl CleanerView {
     fn render_list(&mut self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.system.theme;
         let scanning = self.controller.totals().scanning;
-        let locked = self.controller.selection_locked();
+        let locked = !self.selection_loaded || self.controller.selection_locked();
         let rows = self.controller.rows();
         let mut children: Vec<AnyElement> = Vec::new();
         let mut row_children = vec![None; rows.len()];
-        for category in Category::ALL {
-            let shown: Vec<usize> = (0..rows.len())
-                .filter(|&ix| rows[ix].target.category == category && !is_hidden(&rows[ix]))
-                .collect();
-            if shown.is_empty() {
-                continue;
-            }
+        let shown: Vec<usize> = (0..rows.len())
+            .filter(|&ix| !is_hidden(&rows[ix]))
+            .collect();
+        if !shown.is_empty() {
             children.push(
                 div()
-                    .id(("heading", category as usize))
+                    .id("heading")
                     .role(Role::Heading)
                     .aria_level(2)
-                    .aria_label(category.name())
+                    .aria_label("Windows")
                     .pt(rems(1.14))
                     .pb(rems(0.57))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(category.name())
+                    .child("Windows")
                     .into_any_element(),
             );
             for (pos, &ix) in shown.iter().enumerate() {
@@ -691,6 +884,21 @@ impl CleanerView {
 
     /// The line under the checklist: handoff and Clean progress, then the last result.
     fn status_text(&self) -> Option<String> {
+        if self.controller.is_closing() {
+            return Some("Stopping...".into());
+        }
+        if let Some(error) = &self.selection_error {
+            return Some(error.clone());
+        }
+        if !self.selection_loaded {
+            return Some("Loading Selection...".into());
+        }
+        if !self.pending_saves.is_empty() {
+            return Some("Saving Selection...".into());
+        }
+        if !self.controller.clean_validated() {
+            return Some("Clean is unavailable until disposable Windows validation passes.".into());
+        }
         let rows = self.controller.rows();
         if self.controller.selection_locked() {
             let queued = rows.iter().filter(|r| r.clean.is_some()).count();
@@ -838,9 +1046,7 @@ fn row_status(row: &Row, scanning: bool, t: &Theme) -> RowStatus {
             s.value_color = t.text;
         }
         (Some(CleanProgress::Done(result)), _) => {
-            let deleted = result
-                .deleted_bytes
-                .map(|b| format!("Deleted {}", format::size(b)));
+            let deleted = format!("Deleted {}", format::size(result.deleted_bytes));
             let mut notes: Vec<String> = result
                 .skipped
                 .iter()
@@ -861,11 +1067,11 @@ fn row_status(row: &Row, scanning: bool, t: &Theme) -> RowStatus {
             match result.status {
                 CleanStatus::Complete => {
                     s.icon = Some((ICON_CHECK, t.success));
-                    s.value = deleted.unwrap_or_else(|| "Emptied (size unavailable)".into());
+                    s.value = deleted;
                 }
                 CleanStatus::Partial => {
                     s.icon = Some((ICON_WARNING, t.caution));
-                    s.value = deleted.unwrap_or_else(|| "Partly cleaned".into());
+                    s.value = deleted;
                 }
                 CleanStatus::Failed => {
                     s.icon = Some((ICON_ERROR, t.critical));
@@ -873,7 +1079,7 @@ fn row_status(row: &Row, scanning: bool, t: &Theme) -> RowStatus {
                 }
                 CleanStatus::Stopped => {
                     s.value = "Stopped".into();
-                    notes.extend(deleted.map(|d| format!("{d} before stopping")));
+                    notes.push(format!("{deleted} before stopping"));
                 }
             }
             s.detail = (!notes.is_empty()).then(|| notes.join(" · "));

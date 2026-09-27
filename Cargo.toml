@@ -20,9 +20,15 @@ gpui = { git = "https://github.com/zed-industries/zed", rev = "933d8d93819c749a6
 gpui_windows = { git = "https://github.com/zed-industries/zed", rev = "933d8d93819c749a607e561883855a9b95c79cea", default-features = false }
 futures = "0.3"
 raw-window-handle = "0.6"
+serde_json = "1"
 # Same major version as gpui_windows, so both share one build.
 windows = { version = "0.62", features = [
     "Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
     "UI_ViewManagement",
     "Win32_Graphics_Gdi",
     "Win32_UI_Accessibility",
@@ -42,6 +48,10 @@ undocumented_unsafe_blocks = "warn"
 
 [build-dependencies]
 embed-resource = "3.0"
+
+[dev-dependencies]
+tempfile = "3"
+filetime = "0.2"
 
 # Zed patches async-task at the workspace level; git dependents do not inherit it.
 [patch.crates-io]

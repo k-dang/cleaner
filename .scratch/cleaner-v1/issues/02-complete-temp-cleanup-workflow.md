@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 - Build and validate the portable GPUI app.
 
-**Status:** ready-for-agent
+**Status:** implementation-awaiting-disposable-validation
 
 - [ ] Validate both temp Targets in a disposable Windows environment before enabling their cleanup. Record location and owner-behavior evidence, including concurrent activity and interruption. Present the 24-hour Minimum age as a heuristic, not proof that a file is unused.
 - [ ] Replace fixture actions with real Scan and Clean operations. Resolve built-in local roots through Windows APIs, accept only known Target IDs, and reject network locations before enumeration. Keep filesystem work on a worker thread with ordered UI updates.
@@ -21,3 +21,10 @@
 - [ ] Normal close stops new filesystem work after the current step, suppresses automatic rescan, completes pending Selection saves, and exits after worker completion. Verify that completed deletions remain permanent and forced process termination leaves tolerable partial cleanup.
 - [ ] Pass focused fixture tests for the above behavior, including age boundaries, missing and inaccessible content, root preservation, Selection persistence, readiness, operation exclusion, and shutdown. Use controlled completion rather than timing sleeps.
 - [ ] Demonstrate the complete packaged workflow on seeded disposable data, checking both UI results and remaining files. Verify restart persistence and closing during Scan and Clean. Do not use Kevin's live temp folders as the first destructive test.
+
+## Comments
+
+- 2026-09-26: The code now connects the GPUI screen to the real User temp and Windows temp worker. The other proposed Targets no longer appear or use fixture Clean results. Selection load and serialized atomic saves run on a separate worker. The controller waits for the Scan worker before Clean, locks the captured Selection, and suppresses the post-Clean Scan on close.
+- Fixture-root checks on Windows 11 cover the strict 24-hour cutoff, both Target roots, root preservation, nested folders, absent Targets, blocked roots and descendants, redirected roots and inner links, concurrent directory replacement, pinned ancestors, locked and delete-sharing handles, concurrent file removal, cooperative stop, and abrupt process exit. The Selection store checks explicit unticks, new and obsolete IDs, malformed data, interrupted temporary writes, ordered writes, failed replacement, and redirected storage. Controlled controller tests cover duplicate requests, close during Scan and Clean, ordered results, and the validation gate. `cargo test --lib` passes 33 tests; `cargo clippy --all-targets -- -D warnings` passes.
+- Location evidence: Microsoft defines `FOLDERID_LocalAppData` as `%LOCALAPPDATA%`, `FOLDERID_RoamingAppData` as `%APPDATA%`, and `FOLDERID_Windows` as `%windir%` in the [known-folder table](https://learn.microsoft.com/en-us/windows/win32/shell/knownfolderid). The [CreateFile sharing contract](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew) documents delete sharing and sharing violations. Microsoft's [temporary-file example](https://learn.microsoft.com/en-us/windows/win32/fileio/creating-and-using-a-temporary-file) shows that applications create files in temp locations. The 24-hour rule is a heuristic, not evidence that a file is unused.
+- Acceptance remains open. No disposable Windows account or VM is available in this session. The packaged executable has not run a Clean in an isolated account, and concurrent owner behavior has not been observed there. The production controller keeps Clean disabled until that validation passes. Do not use Kevin's live temp folders for the first destructive test.
