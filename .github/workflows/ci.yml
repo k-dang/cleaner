@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    # The app uses Win32 and GPUI's Windows backend, so it only builds on Windows.
+    runs-on: windows-latest
+    env:
+      # Fetching the pinned zed repository is much faster with the git CLI.
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    steps:
+      - uses: actions/checkout@v5
+      # rust-toolchain.toml selects the pinned toolchain and components.
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
