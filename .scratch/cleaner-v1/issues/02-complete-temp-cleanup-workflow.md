@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 - Build and validate the portable GPUI app.
 
-**Status:** complete-with-waived-isolated-acceptance
+**Status:** done
 
 - [x] Accept both temp Targets for this build based on fixture tests and Kevin's manual Clean. Isolated owner-behavior, concurrent-use, and interruption checks were waived. The 24-hour Minimum age remains a heuristic, not proof that a file is unused.
 - [x] Replace fixture actions with real Scan and Clean operations. Resolve built-in local roots through Windows APIs, accept only known Target IDs, and reject network locations before enumeration. Keep filesystem work on a worker thread with ordered UI updates.
