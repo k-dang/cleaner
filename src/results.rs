@@ -6,6 +6,9 @@ pub enum Problem {
     AccessDenied,
     SharingViolation,
     Redirected,
+    Metadata,
+    NonLocal,
+    Other,
 }
 
 impl Problem {
@@ -14,6 +17,9 @@ impl Problem {
             Problem::AccessDenied => "access denied",
             Problem::SharingViolation => "sharing violation",
             Problem::Redirected => "redirected folder skipped",
+            Problem::Metadata => "metadata unavailable",
+            Problem::NonLocal => "network location skipped",
+            Problem::Other => "I/O error",
         }
     }
 }
@@ -47,11 +53,19 @@ pub enum CleanStatus {
     Stopped,
 }
 
+/// Adds `count` to `problem`'s entry, keeping first-seen order.
+pub fn add_count(counts: &mut Vec<(Problem, u64)>, problem: Problem, count: u64) {
+    match counts.iter_mut().find(|(p, _)| *p == problem) {
+        Some((_, total)) => *total += count,
+        None => counts.push((problem, count)),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CleanResult {
     pub status: CleanStatus,
-    /// Logical bytes accepted for deletion, or `None` when the procedure cannot report them.
-    pub deleted_bytes: Option<u64>,
+    /// Known logical bytes accepted for deletion.
+    pub deleted_bytes: u64,
     /// Known counts of files skipped, by reason.
     pub skipped: Vec<(Problem, u64)>,
     /// A folder or subtree that could not be covered.
