@@ -540,7 +540,7 @@ impl<'a> Walk<'a> {
         self.stopped
     }
 
-    /// Walks `directory`, returning true when it was left empty.
+    /// Returns true when cleanup emptied `directory` and it can be pruned.
     fn walk(&mut self, directory: &OwnedHandle) -> bool {
         if self.stopping() {
             return false;
@@ -558,6 +558,7 @@ impl<'a> Walk<'a> {
         };
         self.visited = true;
         let mut empty = true;
+        let mut removed = false;
         for child in children {
             if self.stopping() {
                 return false;
@@ -590,10 +591,13 @@ impl<'a> Walk<'a> {
                 }
                 if self.clean && child_empty {
                     // Only empty descendants are removed. The Target root is never passed here.
-                    if let Err(error) = delete(&handle) {
-                        empty = false;
-                        if win32_code(&error) != Some(ERROR_DIR_NOT_EMPTY) {
-                            self.problem(classify(&error), false);
+                    match delete(&handle) {
+                        Ok(()) => removed = true,
+                        Err(error) => {
+                            empty = false;
+                            if win32_code(&error) != Some(ERROR_DIR_NOT_EMPTY) {
+                                self.problem(classify(&error), false);
+                            }
                         }
                     }
                 } else {
@@ -612,7 +616,10 @@ impl<'a> Walk<'a> {
                         return false;
                     }
                     match delete(&handle) {
-                        Ok(()) => self.bytes = self.bytes.saturating_add(bytes),
+                        Ok(()) => {
+                            self.bytes = self.bytes.saturating_add(bytes);
+                            removed = true;
+                        }
                         Err(error) => {
                             self.problem(classify(&error), true);
                             empty = false;
@@ -630,7 +637,7 @@ impl<'a> Walk<'a> {
                 }
             }
         }
-        empty
+        empty && removed
     }
 }
 
@@ -1007,6 +1014,38 @@ mod tests {
         assert_eq!(result.status, CleanStatus::Complete);
         assert!(!nested.exists());
         assert!(target.exists());
+    }
+
+    #[test]
+    fn already_empty_descendant_is_preserved() {
+        let (_dir, roots, target, time) = fixture();
+        let empty = target.join("fresh-empty");
+        fs::create_dir(&empty).unwrap();
+        write_at(&target.join("old"), b"old", time - DAY - DAY);
+        let stop = AtomicBool::new(false);
+        let result = clean("user-temp", &roots, time, &stop);
+        assert_eq!(result.status, CleanStatus::Complete);
+        assert_eq!(result.deleted_bytes, 3);
+        assert!(empty.exists());
+        assert!(!target.join("old").exists());
+    }
+
+    #[test]
+    fn undecodable_filename_does_not_hide_eligible_siblings() {
+        let (_dir, roots, target, time) = fixture();
+        let unusual = target.join(OsString::from_wide(&[0xd800]));
+        write_at(&unusual, b"odd", time - DAY - DAY);
+        write_at(&target.join("ordinary"), b"plain", time - DAY - DAY);
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            scan("user-temp", &roots, time, &stop),
+            ScanResult::Complete { bytes: 8 }
+        );
+        let result = clean("user-temp", &roots, time, &stop);
+        assert_eq!(result.status, CleanStatus::Complete);
+        assert_eq!(result.deleted_bytes, 8);
+        assert!(!unusual.exists());
+        assert!(!target.join("ordinary").exists());
     }
 
     #[test]
