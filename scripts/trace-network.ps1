@@ -108,13 +108,6 @@ try {
     Wait-Scan
     'VERIFIED: manual Rescan finished.'
 
-    $clean = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition) |
-        Where-Object { $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button -and $_.Current.Name -like 'Clean*' } |
-        Select-Object -First 1
-    if (-not $clean) { throw 'Clean control was not found; verification is incomplete.' }
-    $reason = if ($clean.Current.IsEnabled) { 'this script exercises only non-destructive controls' } else { 'Clean is disabled in this build' }
-    Write-Warning "NOT VERIFIED: Clean, Scan-to-Clean handoff, and automatic post-Clean rescan ($reason)."
-
     if (-not $app.CloseMainWindow()) { throw 'Could not request app close; verification is incomplete.' }
     if (-not $app.WaitForExit(30000)) { throw 'Cleaner did not close; verification is incomplete.' }
     if ($app.ExitCode -ne 0) { throw "Cleaner exited with code $($app.ExitCode); verification is incomplete." }

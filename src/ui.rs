@@ -2,7 +2,6 @@
 //! scrolling checklist in the middle, and Clean with the last result at the
 //! bottom. It renders controller state and forwards user actions.
 
-use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,7 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowPos, WINDOW_EX_STYLE, WINDOW_STYLE,
 };
 
-use crate::controller::{CleanProgress, Command, Controller, Event, OpId, Operation, Row};
+use crate::controller::{CleanProgress, Command, Controller, Event, OpId, Row};
 use crate::core::{self, Roots};
 use crate::format;
 use crate::results::{CleanStatus, ScanResult};
@@ -120,33 +119,14 @@ struct Worker {
     stop: Arc<AtomicBool>,
 }
 
-struct SaveRequest {
-    sequence: u64,
-    choices: Choices,
-}
-
-struct PendingSave {
-    sequence: u64,
-    choices: Choices,
-    initial: bool,
-}
-
 enum SelectionEvent {
     Loaded(Result<selection::Loaded, String>),
-    Saved {
-        sequence: u64,
-        result: Result<(), String>,
-    },
+    Saved(Result<(), String>),
 }
 
 pub struct CleanerView {
     controller: Controller,
-    save_tx: Sender<SaveRequest>,
-    pending_saves: VecDeque<PendingSave>,
-    next_save: u64,
-    selection_loaded: bool,
-    saved_choices: Option<Choices>,
-    selection_error: Option<String>,
+    save_tx: Sender<Choices>,
     worker: Option<Worker>,
     system: System,
     root_focus: FocusHandle,
@@ -177,7 +157,7 @@ impl CleanerView {
         })
         .detach();
 
-        let (save_tx, save_rx) = std::sync::mpsc::channel::<SaveRequest>();
+        let (save_tx, save_rx) = std::sync::mpsc::channel::<Choices>();
         let (selection_tx, mut selection_rx) = futures::channel::mpsc::unbounded();
         std::thread::spawn(move || {
             let store = SelectionStore::system().map_err(|error| error.to_string());
@@ -188,17 +168,13 @@ impl CleanerView {
             selection_tx
                 .unbounded_send(SelectionEvent::Loaded(loaded))
                 .ok();
-            for request in save_rx {
-                let result = store.as_ref().map_err(Clone::clone).and_then(|store| {
-                    store
-                        .save(&request.choices)
-                        .map_err(|error| error.to_string())
-                });
+            for choices in save_rx {
+                let result = store
+                    .as_ref()
+                    .map_err(Clone::clone)
+                    .and_then(|store| store.save(&choices).map_err(|error| error.to_string()));
                 selection_tx
-                    .unbounded_send(SelectionEvent::Saved {
-                        sequence: request.sequence,
-                        result,
-                    })
+                    .unbounded_send(SelectionEvent::Saved(result))
                     .ok();
             }
         });
@@ -216,8 +192,7 @@ impl CleanerView {
         })
         .detach();
 
-        let mut controller = Controller::new(|_| false);
-        controller.set_selection_saved(false);
+        let controller = Controller::new();
         let row_focus: Vec<FocusHandle> = controller
             .rows()
             .iter()
@@ -248,11 +223,6 @@ impl CleanerView {
         let view = Self {
             controller,
             save_tx,
-            pending_saves: VecDeque::new(),
-            next_save: 0,
-            selection_loaded: false,
-            saved_choices: None,
-            selection_error: None,
             worker: None,
             system,
             root_focus,
@@ -355,7 +325,7 @@ impl CleanerView {
         let next = self.controller.apply(op, event);
         cx.notify();
         self.dispatch(next, cx);
-        if self.controller.is_closing() && self.worker.is_none() && self.pending_saves.is_empty() {
+        if self.controller.ready_to_exit() {
             window.remove_window();
         }
     }
@@ -367,107 +337,34 @@ impl CleanerView {
         cx: &mut Context<Self>,
     ) {
         match event {
-            SelectionEvent::Loaded(Ok(loaded)) => {
-                self.selection_loaded = true;
-                self.controller.replace_selection(&loaded.choices);
-                if loaded.needs_save {
-                    self.queue_save(loaded.choices, true);
-                } else {
-                    self.saved_choices = Some(loaded.choices);
-                    self.controller.set_selection_saved(true);
-                }
+            SelectionEvent::Loaded(loaded) => {
+                let save = self.controller.load_selection(loaded);
+                self.send_save(save);
                 let scan = self.controller.start_scan();
                 self.dispatch(scan, cx);
             }
-            SelectionEvent::Loaded(Err(error)) => {
-                self.selection_loaded = true;
-                self.controller
-                    .replace_selection(&selection::none_selected());
-                self.selection_error = Some(format!("Selection could not be loaded: {error}"));
-                let scan = self.controller.start_scan();
-                self.dispatch(scan, cx);
-            }
-            SelectionEvent::Saved { sequence, result } => {
-                let Some(pending) = self.pending_saves.pop_front() else {
-                    return;
-                };
-                if pending.sequence != sequence {
-                    self.selection_error = Some("Selection saves completed out of order".into());
-                    self.controller.set_selection_saved(false);
-                    return;
-                }
-                match result {
-                    Ok(()) => {
-                        self.saved_choices = Some(pending.choices);
-                        if self.pending_saves.is_empty() {
-                            self.selection_error = None;
-                            self.controller.set_selection_saved(true);
-                        }
-                    }
-                    Err(error) => {
-                        self.selection_error =
-                            Some(format!("Selection could not be saved: {error}"));
-                        if self.pending_saves.is_empty() && !pending.initial {
-                            self.controller.replace_selection(
-                                &self
-                                    .saved_choices
-                                    .clone()
-                                    .unwrap_or_else(selection::none_selected),
-                            );
-                            self.controller
-                                .set_selection_saved(self.saved_choices.is_some());
-                        }
-                    }
-                }
-            }
+            SelectionEvent::Saved(result) => self.controller.save_finished(result),
         }
         cx.notify();
-        if self.controller.is_closing() && self.worker.is_none() && self.pending_saves.is_empty() {
+        if self.controller.ready_to_exit() {
             window.remove_window();
         }
     }
 
-    fn queue_save(&mut self, choices: Choices, initial: bool) {
-        self.next_save += 1;
-        let sequence = self.next_save;
-        self.controller.set_selection_saved(false);
-        if self
-            .save_tx
-            .send(SaveRequest {
-                sequence,
-                choices: choices.clone(),
-            })
-            .is_ok()
+    /// Hands Choices the controller queued to the Selection store thread.
+    fn send_save(&mut self, choices: Option<Choices>) {
+        if let Some(choices) = choices
+            && self.save_tx.send(choices).is_err()
         {
-            self.pending_saves.push_back(PendingSave {
-                sequence,
-                choices,
-                initial,
-            });
-        } else {
-            self.selection_error = Some("Selection save worker stopped".into());
-            if !initial {
-                self.controller.replace_selection(
-                    &self
-                        .saved_choices
-                        .clone()
-                        .unwrap_or_else(selection::none_selected),
-                );
-                self.controller
-                    .set_selection_saved(self.saved_choices.is_some());
-            }
+            self.controller
+                .save_finished(Err("the save worker stopped".into()));
         }
     }
 
     fn toggle(&mut self, id: TargetId, cx: &mut Context<Self>) {
-        if self.selection_loaded && self.controller.toggle(id) {
-            let choices: Choices = self
-                .controller
-                .rows()
-                .iter()
-                .map(|row| (row.target.id.to_string(), row.selected))
-                .collect();
-            self.queue_save(choices, false);
+        let save = self.controller.toggle(id);
+        if save.is_some() {
+            self.send_save(save);
             cx.notify();
         }
     }
@@ -476,7 +373,7 @@ impl CleanerView {
         let stop = self.controller.close();
         self.dispatch(stop, cx);
         cx.notify();
-        self.worker.is_none() && self.pending_saves.is_empty()
+        self.controller.ready_to_exit()
     }
 
     fn rescan(&mut self, cx: &mut Context<Self>) {
@@ -512,9 +409,7 @@ impl CleanerView {
         } else {
             "Scan complete".to_string()
         };
-        let idle = self.selection_loaded
-            && self.controller.operation() == Operation::Idle
-            && !self.controller.is_closing();
+        let idle = self.controller.can_scan();
         let scrolled = self.list.offset().y < px(0.);
 
         div()
@@ -569,7 +464,7 @@ impl CleanerView {
     fn render_list(&mut self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.system.theme;
         let scanning = self.controller.totals().scanning;
-        let locked = !self.selection_loaded || self.controller.selection_locked();
+        let locked = self.controller.selection_locked();
         let rows = self.controller.rows();
         let mut children: Vec<AnyElement> = Vec::new();
         let mut row_children = vec![None; rows.len()];
@@ -812,6 +707,7 @@ impl CleanerView {
             "Clean".to_string()
         };
         let ring = enabled && shows_focus(&self.clean_focus, window);
+        let status = self.status_text();
 
         div()
             .flex()
@@ -827,9 +723,9 @@ impl CleanerView {
                 div()
                     .id("result")
                     .role(Role::Status)
-                    .aria_label(self.status_text().unwrap_or_default())
+                    .aria_label(status.clone().unwrap_or_default())
                     .a11y_synthetic_children(|b| b.parent_node().set_live(accesskit::Live::Polite))
-                    .when_some(self.status_text(), |d, text| d.child(text)),
+                    .when_some(status, |d, text| d.child(text)),
             )
             .child(
                 div()
@@ -885,13 +781,13 @@ impl CleanerView {
         if self.controller.is_closing() {
             return Some("Stopping...".into());
         }
-        if let Some(error) = &self.selection_error {
-            return Some(error.clone());
+        if let Some(error) = self.controller.selection_error() {
+            return Some(error.into());
         }
-        if !self.selection_loaded {
+        if !self.controller.is_selection_loaded() {
             return Some("Loading Selection...".into());
         }
-        if !self.pending_saves.is_empty() {
+        if self.controller.is_saving() {
             return Some("Saving Selection...".into());
         }
         let rows = self.controller.rows();

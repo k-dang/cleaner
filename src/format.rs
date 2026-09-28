@@ -1,7 +1,6 @@
 //! User-facing text for sizes and Clean results.
 
-use crate::results::{CleanResult, CleanStatus, Problem};
-use crate::targets::Target;
+use crate::results::{CleanResult, CleanStatus, Problem, add_count};
 
 /// Formats a byte count the way Windows Explorer does (1024-based units).
 pub fn size(bytes: u64) -> String {
@@ -25,12 +24,12 @@ pub fn size(bytes: u64) -> String {
 
 /// The one-line summary of a finished Clean, e.g.
 /// `Deleted 1.2 GB of files · 4 files skipped (sharing violation)`.
-pub fn clean_summary(results: &[(&Target, CleanResult)]) -> String {
+pub fn clean_summary(results: &[CleanResult]) -> String {
     let mut deleted = 0;
     let mut skipped: Vec<(Problem, u64)> = Vec::new();
     let mut incomplete: Vec<(Problem, u64)> = Vec::new();
     let mut stopped = 0;
-    for (_, result) in results {
+    for result in results {
         deleted += result.deleted_bytes;
         for &(problem, count) in &result.skipped {
             add_count(&mut skipped, problem, count);
@@ -66,14 +65,6 @@ pub fn clean_summary(results: &[(&Target, CleanResult)]) -> String {
     parts.join(" · ")
 }
 
-/// Adds `count` to `problem`'s entry, keeping first-seen order.
-fn add_count(counts: &mut Vec<(Problem, u64)>, problem: Problem, count: u64) {
-    match counts.iter_mut().find(|(p, _)| *p == problem) {
-        Some((_, total)) => *total += count,
-        None => counts.push((problem, count)),
-    }
-}
-
 /// `1 file`, `2 files`.
 pub fn plural(count: u64, noun: &str) -> String {
     if count == 1 {
@@ -86,7 +77,6 @@ pub fn plural(count: u64, noun: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::targets::TARGETS;
 
     #[test]
     fn summary_reports_known_deletions_and_rejected_files() {
@@ -97,7 +87,7 @@ mod tests {
             coverage_problem: None,
         };
         assert_eq!(
-            clean_summary(&[(&TARGETS[0], result)]),
+            clean_summary(&[result]),
             "Deleted 1.2 GB of files · 4 files skipped (sharing violation)"
         );
     }

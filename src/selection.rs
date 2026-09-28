@@ -3,17 +3,16 @@
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use windows::Win32::Storage::FileSystem::{
-    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    FILE_ATTRIBUTE_REPARSE_POINT, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
-use windows::core::PCWSTR;
+use windows::core::HSTRING;
 
-use crate::targets::TARGETS;
+use crate::targets::{TARGETS, Target};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -116,13 +115,11 @@ impl SelectionStore {
             file.write_all(b"\n")?;
             file.sync_all()?;
             drop(file);
-            let from = wide(&temp);
-            let to = wide(&self.path);
             // SAFETY: Both paths are null-terminated and live for the call.
             unsafe {
                 MoveFileExW(
-                    PCWSTR(from.as_ptr()),
-                    PCWSTR(to.as_ptr()),
+                    &HSTRING::from(temp.as_os_str()),
+                    &HSTRING::from(self.path.as_os_str()),
                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
                 )
                 .map_err(io::Error::from)
@@ -135,33 +132,26 @@ impl SelectionStore {
     }
 }
 
+/// Choices for every built-in Target, selected where `pick` says so.
+pub fn choices(pick: impl Fn(&Target) -> bool) -> Choices {
+    TARGETS
+        .iter()
+        .map(|target| (target.id.to_string(), pick(target)))
+        .collect()
+}
+
 pub fn defaults() -> Choices {
-    TARGETS
-        .iter()
-        .map(|target| (target.id.to_string(), target.default_selected))
-        .collect()
-}
-
-pub fn none_selected() -> Choices {
-    TARGETS
-        .iter()
-        .map(|target| (target.id.to_string(), false))
-        .collect()
-}
-
-fn wide(path: &Path) -> Vec<u16> {
-    path.as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
+    choices(|target| target.default_selected)
 }
 
 fn reject_redirected(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_attributes() & 0x400 != 0 => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Selection directory is redirected",
-        )),
+        Ok(metadata) if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 => {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Selection directory is redirected",
+            ))
+        }
         Ok(_) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),

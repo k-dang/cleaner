@@ -53,6 +53,14 @@ pub enum CleanStatus {
     Stopped,
 }
 
+/// Adds `count` to `problem`'s entry, keeping first-seen order.
+pub fn add_count(counts: &mut Vec<(Problem, u64)>, problem: Problem, count: u64) {
+    match counts.iter_mut().find(|(p, _)| *p == problem) {
+        Some((_, total)) => *total += count,
+        None => counts.push((problem, count)),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CleanResult {
     pub status: CleanStatus,

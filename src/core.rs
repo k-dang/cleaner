@@ -2,85 +2,45 @@
 //! All child opens are relative to a verified parent handle. A name seen in a
 //! directory listing is never later resolved through an absolute path.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::mem::{align_of, offset_of, size_of};
-use std::os::windows::ffi::OsStrExt;
-use std::path::{Component, Path, PathBuf};
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, RPC_E_CHANGED_MODE};
+use windows::Wdk::Foundation::OBJECT_ATTRIBUTES;
+use windows::Wdk::Storage::FileSystem::{
+    FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT,
+    FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
+};
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_DIR_NOT_EMPTY, ERROR_LOCK_VIOLATION,
+    ERROR_NO_MORE_FILES, ERROR_SHARING_VIOLATION, HANDLE, OBJ_CASE_INSENSITIVE, RPC_E_CHANGED_MODE,
+    RtlNtStatusToDosError, UNICODE_STRING, WIN32_ERROR,
+};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
     FILE_ATTRIBUTE_TAG_INFO, FILE_BASIC_INFO, FILE_DISPOSITION_FLAG_DELETE,
     FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_ID_BOTH_DIR_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FILE_STANDARD_INFO, FileAttributeTagInfo, FileBasicInfo,
-    FileDispositionInfoEx, FileIdBothDirectoryInfo, FileStandardInfo, GetDriveTypeW,
-    GetFileInformationByHandleEx, OPEN_EXISTING, SetFileInformationByHandle,
+    FILE_FLAGS_AND_ATTRIBUTES, FILE_ID_BOTH_DIR_INFO, FILE_INFO_BY_HANDLE_CLASS,
+    FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_STANDARD_INFO, FileAttributeTagInfo, FileBasicInfo, FileDispositionInfoEx,
+    FileIdBothDirectoryInfo, FileStandardInfo, GetDriveTypeW, GetFileInformationByHandleEx,
+    OPEN_EXISTING, SYNCHRONIZE, SetFileInformationByHandle,
 };
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+use windows::Win32::System::IO::IO_STATUS_BLOCK;
+use windows::Win32::System::SystemServices::{IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK};
+use windows::Win32::System::WindowsProgramming::DRIVE_FIXED;
 use windows::Win32::UI::Shell::{FOLDERID_LocalAppData, FOLDERID_Windows, SHGetKnownFolderPath};
-use windows::core::{GUID, PCWSTR};
+use windows::core::{GUID, HSTRING, PWSTR};
 
-use crate::results::{CleanResult, CleanStatus, Problem, ScanResult};
+use crate::results::{CleanResult, CleanStatus, Problem, ScanResult, add_count};
 use crate::targets::TargetId;
 
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
-const DRIVE_FIXED: u32 = 3;
-const FILE_DIRECTORY_FILE: u32 = 1;
-const FILE_NON_DIRECTORY_FILE: u32 = 0x40;
-const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x20;
-const FILE_OPEN_REPARSE_POINT: u32 = 0x20_0000;
-const FILE_OPEN: u32 = 1;
-// Denying delete sharing pins every opened name against external rename while
-// it is inspected or deleted. An existing open without compatible sharing is
-// skipped instead of forcing access.
-const FILE_SHARE_NO_DELETE: u32 = 3;
-const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
-const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
-
-#[repr(C)]
-struct UnicodeString {
-    length: u16,
-    maximum_length: u16,
-    buffer: *mut u16,
-}
-
-#[repr(C)]
-struct ObjectAttributes {
-    length: u32,
-    root_directory: HANDLE,
-    object_name: *mut UnicodeString,
-    attributes: u32,
-    security_descriptor: *mut std::ffi::c_void,
-    security_quality_of_service: *mut std::ffi::c_void,
-}
-
-#[repr(C)]
-struct IoStatusBlock {
-    status: isize,
-    information: usize,
-}
-
-#[link(name = "ntdll")]
-unsafe extern "system" {
-    fn NtCreateFile(
-        handle: *mut HANDLE,
-        desired_access: u32,
-        attributes: *const ObjectAttributes,
-        status: *mut IoStatusBlock,
-        allocation_size: *const i64,
-        file_attributes: u32,
-        share_access: u32,
-        create_disposition: u32,
-        create_options: u32,
-        ea_buffer: *const std::ffi::c_void,
-        ea_length: u32,
-    ) -> i32;
-    fn RtlNtStatusToDosError(status: i32) -> u32;
-}
 
 struct OwnedHandle(HANDLE);
 
@@ -106,7 +66,6 @@ impl Drop for OwnedHandle {
 unsafe impl Send for OwnedHandle {}
 
 /// Production roots come from Windows known-folder APIs. Tests use fixture roots.
-#[derive(Clone)]
 pub struct Roots {
     local_app_data: Result<PathBuf, Problem>,
     win_dir: Result<PathBuf, Problem>,
@@ -139,6 +98,11 @@ impl Roots {
             .map(|path| path.join("Temp"))
             .map_err(|problem| *problem)
     }
+
+    /// Opens a Target's folder. `None` means it is confirmed absent.
+    fn open(&self, id: TargetId) -> Result<Option<RootHandles>, Problem> {
+        root_handle(&self.path(id)?).map_err(|error| root_problem(&error))
+    }
 }
 
 /// Resolve and validate only the requested folder; unrelated roots cannot block it.
@@ -163,7 +127,7 @@ fn known_folder(id: &GUID) -> io::Result<PathBuf> {
     // successful initialization before returning.
     let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
     if initialized.is_err() && initialized != RPC_E_CHANGED_MODE {
-        return Err(io::Error::from(windows::core::Error::from(initialized)));
+        return Err(os_error(windows::core::Error::from(initialized)));
     }
     let owns_com = initialized.is_ok();
     let result = known_folder_initialized(id);
@@ -176,8 +140,7 @@ fn known_folder(id: &GUID) -> io::Result<PathBuf> {
 
 fn known_folder_initialized(id: &GUID) -> io::Result<PathBuf> {
     // SAFETY: Shell returns a terminated path that remains allocated until freed below.
-    let path =
-        unsafe { SHGetKnownFolderPath(id, Default::default(), None) }.map_err(io::Error::from)?;
+    let path = unsafe { SHGetKnownFolderPath(id, Default::default(), None) }.map_err(os_error)?;
     // SAFETY: the shell returned a valid terminated UTF-16 buffer.
     let result = unsafe { path.to_string() }
         .map(PathBuf::from)
@@ -187,62 +150,69 @@ fn known_folder_initialized(id: &GUID) -> io::Result<PathBuf> {
     result
 }
 
-fn wide(value: &OsStr) -> Vec<u16> {
-    value.encode_wide().chain(std::iter::once(0)).collect()
+/// Converts a `windows` error to an `io::Error` carrying the plain Win32 code, so
+/// `raw_os_error` and `kind` see the same values as errors from std.
+fn os_error(error: windows::core::Error) -> io::Error {
+    match WIN32_ERROR::from_error(&error) {
+        Some(code) => io::Error::from_raw_os_error(code.0.cast_signed()),
+        None => io::Error::from(error),
+    }
+}
+
+fn win32_code(error: &io::Error) -> Option<WIN32_ERROR> {
+    error
+        .raw_os_error()
+        .map(|code| WIN32_ERROR(code.cast_unsigned()))
 }
 
 fn classify(error: &io::Error) -> Problem {
-    match error.raw_os_error() {
-        Some(5) => Problem::AccessDenied,
-        Some(32 | 33) => Problem::SharingViolation,
+    match win32_code(error) {
+        Some(ERROR_ACCESS_DENIED) => Problem::AccessDenied,
+        Some(ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION) => Problem::SharingViolation,
         _ => Problem::Other,
     }
 }
 
 fn relative_open(
-    parent: HANDLE,
+    parent: &OwnedHandle,
     name: &OsStr,
     directory: bool,
     delete: bool,
 ) -> io::Result<OwnedHandle> {
-    let mut units = wide(name);
-    if units.len() < 2
-        || units[..units.len() - 1]
+    let mut units: Vec<u16> = name.encode_wide().collect();
+    if units.is_empty()
+        || units
             .iter()
-            .any(|&unit| unit == b'\\' as u16 || unit == b'/' as u16 || unit == 0)
+            .any(|&unit| unit == u16::from(b'\\') || unit == u16::from(b'/') || unit == 0)
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "invalid child name",
         ));
     }
-    let byte_len = (units.len() - 1) * 2;
-    let length = u16::try_from(byte_len)
+    let length = u16::try_from(units.len() * 2)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "long name"))?;
-    let mut name = UnicodeString {
-        length,
-        maximum_length: length,
-        buffer: units.as_mut_ptr(),
+    let name = UNICODE_STRING {
+        Length: length,
+        MaximumLength: length,
+        Buffer: PWSTR(units.as_mut_ptr()),
     };
-    let attributes = ObjectAttributes {
-        length: size_of::<ObjectAttributes>()
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>()
             .try_into()
             .expect("Win32 struct size"),
-        root_directory: parent,
-        object_name: &mut name,
-        attributes: 0x40, // OBJ_CASE_INSENSITIVE
-        security_descriptor: std::ptr::null_mut(),
-        security_quality_of_service: std::ptr::null_mut(),
+        RootDirectory: parent.0,
+        ObjectName: &name,
+        Attributes: OBJ_CASE_INSENSITIVE,
+        ..Default::default()
     };
-    let mut handle = HANDLE::default();
-    let mut status = IoStatusBlock {
-        status: 0,
-        information: 0,
-    };
-    let access = FILE_READ_ATTRIBUTES.0
-        | (if directory { FILE_LIST_DIRECTORY.0 } else { 0 })
-        | (if delete { DELETE.0 } else { 0 })
-        | 0x10_0000; // SYNCHRONIZE
+    let mut access = FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+    if directory {
+        access |= FILE_LIST_DIRECTORY;
+    }
+    if delete {
+        access |= DELETE;
+    }
     let options = FILE_OPEN_REPARSE_POINT
         | FILE_SYNCHRONOUS_IO_NONALERT
         | if directory {
@@ -250,6 +220,8 @@ fn relative_open(
         } else {
             FILE_NON_DIRECTORY_FILE
         };
+    let mut handle = HANDLE::default();
+    let mut status = IO_STATUS_BLOCK::default();
     // SAFETY: buffers and parent handle live for the synchronous call. The
     // returned handle is owned only on successful NTSTATUS.
     let code = unsafe {
@@ -258,54 +230,69 @@ fn relative_open(
             access,
             &attributes,
             &mut status,
-            std::ptr::null(),
-            0,
-            FILE_SHARE_NO_DELETE,
+            None,
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            // Denying delete sharing pins every opened name against external rename
+            // while it is inspected or deleted. An existing open without compatible
+            // sharing is skipped instead of forcing access.
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
             FILE_OPEN,
             options,
-            std::ptr::null(),
+            None,
             0,
         )
     };
-    if code < 0 {
-        // SAFETY: RtlNtStatusToDosError accepts the returned status value.
+    if code.is_err() {
+        // SAFETY: RtlNtStatusToDosError accepts any NTSTATUS value.
         let win32 = unsafe { RtlNtStatusToDosError(code) };
         return Err(io::Error::from_raw_os_error(win32.cast_signed()));
     }
     Ok(OwnedHandle(handle))
 }
 
-fn info<T: Default>(
-    handle: HANDLE,
-    class: windows::Win32::Storage::FileSystem::FILE_INFO_BY_HANDLE_CLASS,
-) -> io::Result<T> {
+fn info<T: Default>(handle: &OwnedHandle, class: FILE_INFO_BY_HANDLE_CLASS) -> io::Result<T> {
     let mut value = T::default();
     // SAFETY: the typed buffer has the required size and remains live.
     unsafe {
         GetFileInformationByHandleEx(
-            handle,
+            handle.0,
             class,
             (&mut value as *mut T).cast(),
             size_of::<T>().try_into().expect("Win32 struct size"),
         )
-        .map_err(io::Error::from)?;
+        .map_err(os_error)?;
     }
     Ok(value)
 }
 
+fn is_reparse(tag: &FILE_ATTRIBUTE_TAG_INFO) -> bool {
+    tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+}
+
+/// A symlink or mount point: removable as a name without visiting its destination.
+fn is_link(tag: &FILE_ATTRIBUTE_TAG_INFO) -> bool {
+    is_reparse(tag)
+        && (tag.ReparseTag == IO_REPARSE_TAG_SYMLINK
+            || tag.ReparseTag == IO_REPARSE_TAG_MOUNT_POINT)
+}
+
 fn root_handle(path: &Path) -> io::Result<Option<RootHandles>> {
-    let text = path.as_os_str().to_string_lossy();
-    let bytes = text.as_bytes();
-    if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' || bytes[2] != b'\\' {
-        return Err(io::Error::new(
+    let mut components = path.components();
+    let drive = match (components.next(), components.next()) {
+        (Some(Component::Prefix(prefix)), Some(Component::RootDir)) => match prefix.kind() {
+            Prefix::Disk(letter) => Some(HSTRING::from(format!("{}:\\", char::from(letter)))),
+            _ => None,
+        },
+        _ => None,
+    }
+    .ok_or_else(|| {
+        io::Error::new(
             io::ErrorKind::InvalidInput,
             "Target is not on a local drive",
-        ));
-    }
-    let drive = format!("{}:\\", bytes[0] as char);
-    let drive_wide = wide(OsStr::new(&drive));
-    // SAFETY: `drive_wide` is terminated and lives through the call.
-    if unsafe { GetDriveTypeW(PCWSTR(drive_wide.as_ptr())) } != DRIVE_FIXED {
+        )
+    })?;
+    // SAFETY: `drive` is terminated and lives through the call.
+    if unsafe { GetDriveTypeW(&drive) } != DRIVE_FIXED {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "Target is not on a local fixed drive",
@@ -314,31 +301,30 @@ fn root_handle(path: &Path) -> io::Result<Option<RootHandles>> {
     // SAFETY: flags open the drive root itself, without following a reparse point.
     let volume = OwnedHandle(unsafe {
         CreateFileW(
-            PCWSTR(drive_wide.as_ptr()),
-            FILE_LIST_DIRECTORY.0 | FILE_READ_ATTRIBUTES.0,
+            &drive,
+            (FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES).0,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             None,
             OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
             None,
         )
-        .map_err(io::Error::from)?
+        .map_err(os_error)?
     });
     let mut handles = vec![volume];
-    for component in path.components().skip(2) {
+    for component in components {
         let Component::Normal(name) = component else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "invalid Target path",
             ));
         };
-        let current = match relative_open(handles.last().unwrap().0, name, true, false) {
+        let current = match relative_open(handles.last().unwrap(), name, true, false) {
             Ok(handle) => handle,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
-        let tag: FILE_ATTRIBUTE_TAG_INFO = info(current.0, FileAttributeTagInfo)?;
-        if tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+        if is_reparse(&info(&current, FileAttributeTagInfo)?) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "redirected folder",
@@ -367,9 +353,10 @@ fn cutoff(time: SystemTime) -> i64 {
     i64::try_from(ticks).unwrap_or(i64::MAX)
 }
 
-fn eligible(handle: HANDLE, cutoff: i64) -> io::Result<Option<u64>> {
+/// The logical size of an old enough file, or `None` if it is too recent. A link
+/// counts as 0 bytes, since removing it frees nothing it points to.
+fn eligible(handle: &OwnedHandle, link: bool, cutoff: i64) -> io::Result<Option<u64>> {
     let basic: FILE_BASIC_INFO = info(handle, FileBasicInfo)?;
-    let tag: FILE_ATTRIBUTE_TAG_INFO = info(handle, FileAttributeTagInfo)?;
     if basic.LastWriteTime <= 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -379,11 +366,7 @@ fn eligible(handle: HANDLE, cutoff: i64) -> io::Result<Option<u64>> {
     if basic.LastWriteTime >= cutoff {
         return Ok(None);
     }
-    if tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
-        if tag.ReparseTag != IO_REPARSE_TAG_SYMLINK && tag.ReparseTag != IO_REPARSE_TAG_MOUNT_POINT
-        {
-            return Ok(None);
-        }
+    if link {
         return Ok(Some(0));
     }
     let standard: FILE_STANDARD_INFO = info(handle, FileStandardInfo)?;
@@ -392,30 +375,30 @@ fn eligible(handle: HANDLE, cutoff: i64) -> io::Result<Option<u64>> {
     })?))
 }
 
-fn delete(handle: HANDLE) -> io::Result<()> {
+fn delete(handle: &OwnedHandle) -> io::Result<()> {
     let disposition = FILE_DISPOSITION_INFO_EX {
         Flags: FILE_DISPOSITION_FLAG_DELETE,
     };
     // SAFETY: the handle was opened with DELETE and the struct lives for the call.
     unsafe {
         SetFileInformationByHandle(
-            handle,
+            handle.0,
             FileDispositionInfoEx,
             (&disposition as *const FILE_DISPOSITION_INFO_EX).cast(),
             size_of::<FILE_DISPOSITION_INFO_EX>()
                 .try_into()
                 .expect("Win32 struct size"),
         )
-        .map_err(io::Error::from)
+        .map_err(os_error)
     }
 }
 
 struct Entry {
-    name: String,
+    name: OsString,
     directory: bool,
 }
 
-fn entries(handle: HANDLE, stop: &AtomicBool) -> io::Result<Vec<Entry>> {
+fn entries(handle: &OwnedHandle, stop: &AtomicBool) -> io::Result<Vec<Entry>> {
     let mut found = Vec::new();
     let mut buffer = [0u64; 8192];
     loop {
@@ -425,7 +408,7 @@ fn entries(handle: HANDLE, stop: &AtomicBool) -> io::Result<Vec<Entry>> {
         // SAFETY: aligned writable buffer. The kernel writes complete entries.
         let result = unsafe {
             GetFileInformationByHandleEx(
-                handle,
+                handle.0,
                 FileIdBothDirectoryInfo,
                 buffer.as_mut_ptr().cast(),
                 size_of_val(&buffer)
@@ -434,10 +417,10 @@ fn entries(handle: HANDLE, stop: &AtomicBool) -> io::Result<Vec<Entry>> {
             )
         };
         if let Err(error) = result {
-            if error.code().0 == 0x8007_0012u32.cast_signed() {
+            if WIN32_ERROR::from_error(&error) == Some(ERROR_NO_MORE_FILES) {
                 break;
-            } // ERROR_NO_MORE_FILES
-            return Err(io::Error::from(error));
+            }
+            return Err(os_error(error));
         }
         let mut offset = 0usize;
         loop {
@@ -486,8 +469,7 @@ fn entries(handle: HANDLE, stop: &AtomicBool) -> io::Result<Vec<Entry>> {
                     name_len / 2,
                 )
             };
-            let name = String::from_utf16(units)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid UTF-16 name"))?;
+            let name = OsString::from_wide(units);
             if name != "." && name != ".." {
                 found.push(Entry {
                     name,
@@ -503,143 +485,153 @@ fn entries(handle: HANDLE, stop: &AtomicBool) -> io::Result<Vec<Entry>> {
     Ok(found)
 }
 
-#[derive(Default)]
-struct Walk {
+/// One Scan or Clean walk over a Target: its settings and what it found so far.
+struct Walk<'a> {
+    clean: bool,
+    cutoff: i64,
+    stop: &'a AtomicBool,
+    /// Test hook, called before each child is opened.
+    before_open: &'a mut dyn FnMut(&OsStr),
     bytes: u64,
     visited: bool,
     problem: Option<Problem>,
     skipped: Vec<(Problem, u64)>,
-    rejected: bool,
     stopped: bool,
 }
 
-impl Walk {
-    fn problem(&mut self, problem: Problem, file: bool, clean: bool) {
-        self.rejected = true;
-        if !file || !clean || problem == Problem::Metadata {
+impl<'a> Walk<'a> {
+    fn new(
+        clean: bool,
+        time: SystemTime,
+        stop: &'a AtomicBool,
+        before_open: &'a mut dyn FnMut(&OsStr),
+    ) -> Self {
+        Self {
+            clean,
+            cutoff: cutoff(time),
+            stop,
+            before_open,
+            bytes: 0,
+            visited: false,
+            problem: None,
+            skipped: Vec::new(),
+            stopped: false,
+        }
+    }
+
+    /// Records a problem. A file that Clean skips for a reason other than
+    /// unavailable metadata counts only in `skipped`, not as a coverage problem.
+    fn problem(&mut self, problem: Problem, file: bool) {
+        if !file || !self.clean || problem == Problem::Metadata {
             self.problem.get_or_insert(problem);
         }
         if file {
-            if let Some((_, count)) = self
-                .skipped
-                .iter_mut()
-                .find(|(reason, _)| *reason == problem)
-            {
-                *count += 1;
-            } else {
-                self.skipped.push((problem, 1));
-            }
+            add_count(&mut self.skipped, problem, 1);
         }
     }
-}
 
-fn walk(
-    directory: &OwnedHandle,
-    clean: bool,
-    cutoff: i64,
-    stop: &AtomicBool,
-    state: &mut Walk,
-    before_open: &mut dyn FnMut(&str),
-) -> bool {
-    if stop.load(Ordering::Relaxed) {
-        state.stopped = true;
-        return false;
+    fn rejected(&self) -> bool {
+        self.problem.is_some() || !self.skipped.is_empty()
     }
-    let children = match entries(directory.0, stop) {
-        Ok(children) => children,
-        Err(error) if error.kind() == io::ErrorKind::Interrupted => {
-            state.stopped = true;
+
+    /// True once a stop was requested; the walk then returns without further work.
+    fn stopping(&mut self) -> bool {
+        self.stopped |= self.stop.load(Ordering::Relaxed);
+        self.stopped
+    }
+
+    /// Walks `directory`, returning true when it was left empty.
+    fn walk(&mut self, directory: &OwnedHandle) -> bool {
+        if self.stopping() {
             return false;
         }
-        Err(error) => {
-            state.problem(classify(&error), false, clean);
-            return false;
-        }
-    };
-    state.visited = true;
-    let mut empty = true;
-    for child in children {
-        if stop.load(Ordering::Relaxed) {
-            state.stopped = true;
-            return false;
-        }
-        before_open(&child.name);
-        if stop.load(Ordering::Relaxed) {
-            state.stopped = true;
-            return false;
-        }
-        let handle =
-            match relative_open(directory.0, OsStr::new(&child.name), child.directory, clean) {
+        let children = match entries(directory, self.stop) {
+            Ok(children) => children,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                self.stopped = true;
+                return false;
+            }
+            Err(error) => {
+                self.problem(classify(&error), false);
+                return false;
+            }
+        };
+        self.visited = true;
+        let mut empty = true;
+        for child in children {
+            if self.stopping() {
+                return false;
+            }
+            (self.before_open)(&child.name);
+            if self.stopping() {
+                return false;
+            }
+            let handle = match relative_open(directory, &child.name, child.directory, self.clean) {
                 Ok(handle) => handle,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                 Err(error) => {
-                    state.problem(classify(&error), !child.directory, clean);
+                    self.problem(classify(&error), !child.directory);
                     empty = false;
                     continue;
                 }
             };
-        let tag: FILE_ATTRIBUTE_TAG_INFO = match info(handle.0, FileAttributeTagInfo) {
-            Ok(tag) => tag,
-            Err(error) => {
-                state.problem(classify(&error), !child.directory, clean);
+            let tag: FILE_ATTRIBUTE_TAG_INFO = match info(&handle, FileAttributeTagInfo) {
+                Ok(tag) => tag,
+                Err(error) => {
+                    self.problem(classify(&error), !child.directory);
+                    empty = false;
+                    continue;
+                }
+            };
+            if child.directory && !is_reparse(&tag) {
+                let child_empty = self.walk(&handle);
+                if self.stopping() {
+                    return false;
+                }
+                if self.clean && child_empty {
+                    // Only empty descendants are removed. The Target root is never passed here.
+                    if let Err(error) = delete(&handle) {
+                        empty = false;
+                        if win32_code(&error) != Some(ERROR_DIR_NOT_EMPTY) {
+                            self.problem(classify(&error), false);
+                        }
+                    }
+                } else {
+                    empty = false;
+                }
+                continue;
+            }
+            if is_reparse(&tag) && !is_link(&tag) {
+                self.problem(Problem::Redirected, false);
                 empty = false;
                 continue;
             }
-        };
-        let redirected = tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0;
-        if child.directory && !redirected {
-            let child_empty = walk(&handle, clean, cutoff, stop, state, before_open);
-            if stop.load(Ordering::Relaxed) {
-                state.stopped = true;
-                return false;
-            }
-            if clean && child_empty && !state.stopped {
-                // Only empty descendants are removed. The Target root is never passed here.
-                if let Err(error) = delete(handle.0) {
+            match eligible(&handle, is_link(&tag), self.cutoff) {
+                Ok(Some(bytes)) if self.clean => {
+                    if self.stopping() {
+                        return false;
+                    }
+                    match delete(&handle) {
+                        Ok(()) => self.bytes = self.bytes.saturating_add(bytes),
+                        Err(error) => {
+                            self.problem(classify(&error), true);
+                            empty = false;
+                        }
+                    }
+                }
+                Ok(Some(bytes)) => {
+                    self.bytes = self.bytes.saturating_add(bytes);
                     empty = false;
-                    if error.raw_os_error() != Some(145) {
-                        state.problem(classify(&error), false, clean);
-                    }
                 }
-            } else {
-                empty = false;
-            }
-            continue;
-        }
-        if redirected
-            && tag.ReparseTag != IO_REPARSE_TAG_SYMLINK
-            && tag.ReparseTag != IO_REPARSE_TAG_MOUNT_POINT
-        {
-            state.problem(Problem::Redirected, false, clean);
-            empty = false;
-            continue;
-        }
-        match eligible(handle.0, cutoff) {
-            Ok(Some(bytes)) if clean => {
-                if stop.load(Ordering::Relaxed) {
-                    state.stopped = true;
-                    return false;
-                }
-                match delete(handle.0) {
-                    Ok(()) => state.bytes = state.bytes.saturating_add(bytes),
-                    Err(error) => {
-                        state.problem(classify(&error), true, clean);
-                        empty = false;
-                    }
+                Ok(None) => empty = false,
+                Err(_) => {
+                    self.problem(Problem::Metadata, true);
+                    empty = false;
                 }
             }
-            Ok(Some(bytes)) => {
-                state.bytes = state.bytes.saturating_add(bytes);
-                empty = false;
-            }
-            Ok(None) => empty = false,
-            Err(_error) => {
-                state.problem(Problem::Metadata, true, clean);
-                empty = false;
-            }
         }
+        empty
     }
-    empty
 }
 
 /// Scan one built-in Target at a fixed operation time.
@@ -652,43 +644,28 @@ fn scan_inner(
     roots: &Roots,
     time: SystemTime,
     stop: &AtomicBool,
-    before_open: &mut dyn FnMut(&str),
+    before_open: &mut dyn FnMut(&OsStr),
 ) -> ScanResult {
-    let path = match roots.path(id) {
-        Ok(path) => path,
-        Err(problem) => return ScanResult::Failed { problem },
-    };
-    let root = match root_handle(&path) {
+    let root = match roots.open(id) {
         Ok(Some(root)) => root,
         Ok(None) => return ScanResult::NotPresent,
-        Err(error) => {
-            return ScanResult::Failed {
-                problem: root_problem(&error),
-            };
-        }
+        Err(problem) => return ScanResult::Failed { problem },
     };
-    let mut state = Walk::default();
-    walk(
-        root.target(),
-        false,
-        cutoff(time),
-        stop,
-        &mut state,
-        before_open,
-    );
-    if state.stopped {
+    let mut walk = Walk::new(false, time, stop, before_open);
+    walk.walk(root.target());
+    if walk.stopped {
         ScanResult::Stopped
-    } else if let Some(problem) = state.problem {
-        if state.visited {
+    } else if let Some(problem) = walk.problem {
+        if walk.visited {
             ScanResult::Partial {
-                bytes: state.bytes,
+                bytes: walk.bytes,
                 problem,
             }
         } else {
             ScanResult::Failed { problem }
         }
     } else {
-        ScanResult::Complete { bytes: state.bytes }
+        ScanResult::Complete { bytes: walk.bytes }
     }
 }
 
@@ -702,51 +679,25 @@ fn clean_inner(
     roots: &Roots,
     time: SystemTime,
     stop: &AtomicBool,
-    before_open: &mut dyn FnMut(&str),
+    before_open: &mut dyn FnMut(&OsStr),
 ) -> CleanResult {
-    let path = match roots.path(id) {
-        Ok(path) => path,
-        Err(problem) => {
-            return CleanResult {
-                status: CleanStatus::Failed,
-                deleted_bytes: 0,
-                skipped: vec![],
-                coverage_problem: Some(problem),
-            };
-        }
+    let untouched = |status, coverage_problem| CleanResult {
+        status,
+        deleted_bytes: 0,
+        skipped: vec![],
+        coverage_problem,
     };
-    let root = match root_handle(&path) {
+    let root = match roots.open(id) {
         Ok(Some(root)) => root,
-        Ok(None) => {
-            return CleanResult {
-                status: CleanStatus::Complete,
-                deleted_bytes: 0,
-                skipped: vec![],
-                coverage_problem: None,
-            };
-        }
-        Err(error) => {
-            return CleanResult {
-                status: CleanStatus::Failed,
-                deleted_bytes: 0,
-                skipped: vec![],
-                coverage_problem: Some(root_problem(&error)),
-            };
-        }
+        Ok(None) => return untouched(CleanStatus::Complete, None),
+        Err(problem) => return untouched(CleanStatus::Failed, Some(problem)),
     };
-    let mut state = Walk::default();
-    walk(
-        root.target(),
-        true,
-        cutoff(time),
-        stop,
-        &mut state,
-        before_open,
-    );
-    let status = if state.stopped {
+    let mut walk = Walk::new(true, time, stop, before_open);
+    walk.walk(root.target());
+    let status = if walk.stopped {
         CleanStatus::Stopped
-    } else if state.rejected {
-        if state.bytes > 0 {
+    } else if walk.rejected() {
+        if walk.bytes > 0 {
             CleanStatus::Partial
         } else {
             CleanStatus::Failed
@@ -756,9 +707,9 @@ fn clean_inner(
     };
     CleanResult {
         status,
-        deleted_bytes: state.bytes,
-        skipped: state.skipped,
-        coverage_problem: state.problem,
+        deleted_bytes: walk.bytes,
+        skipped: walk.skipped,
+        coverage_problem: walk.problem,
     }
 }
 
@@ -767,6 +718,8 @@ mod tests {
     use super::*;
     use filetime::{FileTime, set_file_mtime};
     use std::fs;
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_MODE};
 
     fn fixture() -> (tempfile::TempDir, Roots, PathBuf, SystemTime) {
         let dir = tempfile::tempdir().unwrap();
@@ -778,6 +731,16 @@ mod tests {
         fs::create_dir_all(&target).unwrap();
         let time = UNIX_EPOCH + Duration::from_secs(2_000_000_000);
         (dir, roots, target, time)
+    }
+
+    /// Opens `path`, allowing only `share` access to other opens until the File drops.
+    fn hold(path: &Path, share: FILE_SHARE_MODE) -> fs::File {
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(share.0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+            .open(path)
+            .unwrap()
     }
 
     fn write_at(path: &Path, bytes: &[u8], time: SystemTime) {
@@ -975,20 +938,7 @@ mod tests {
         let (_dir, roots, target, time) = fixture();
         let file = target.join("locked");
         write_at(&file, b"data", time - DAY - DAY);
-        let name = wide(file.as_os_str());
-        // SAFETY: the path is terminated. No sharing is allowed until the handle drops.
-        let locked = OwnedHandle(unsafe {
-            CreateFileW(
-                PCWSTR(name.as_ptr()),
-                windows::Win32::Foundation::GENERIC_READ.0,
-                windows::Win32::Storage::FileSystem::FILE_SHARE_MODE(0),
-                None,
-                OPEN_EXISTING,
-                Default::default(),
-                None,
-            )
-            .unwrap()
-        });
+        let locked = hold(&file, FILE_SHARE_MODE(0));
         let stop = AtomicBool::new(false);
         let result = clean("user-temp", &roots, time, &stop);
         assert_eq!(result.status, CleanStatus::Failed);
@@ -1003,22 +953,10 @@ mod tests {
         let (_dir, roots, target, time) = fixture();
         let file = target.join("shared");
         write_at(&file, b"data", time - DAY - DAY);
-        let name = wide(file.as_os_str());
-        // SAFETY: the path is terminated. This handle explicitly permits deletion.
-        let shared = OwnedHandle(unsafe {
-            CreateFileW(
-                PCWSTR(name.as_ptr()),
-                windows::Win32::Foundation::GENERIC_READ.0,
-                FILE_SHARE_READ
-                    | FILE_SHARE_WRITE
-                    | windows::Win32::Storage::FileSystem::FILE_SHARE_DELETE,
-                None,
-                OPEN_EXISTING,
-                Default::default(),
-                None,
-            )
-            .unwrap()
-        });
+        let shared = hold(
+            &file,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        );
         let stop = AtomicBool::new(false);
         let result = clean("user-temp", &roots, time, &stop);
         assert_eq!(result.status, CleanStatus::Complete);
@@ -1096,20 +1034,7 @@ mod tests {
         write_at(&target.join("visible"), b"one", time - DAY - DAY);
         let stop = AtomicBool::new(false);
 
-        let root_name = wide(target.as_os_str());
-        // SAFETY: the terminated path names a live fixture directory.
-        let root_lock = OwnedHandle(unsafe {
-            CreateFileW(
-                PCWSTR(root_name.as_ptr()),
-                windows::Win32::Foundation::GENERIC_READ.0,
-                windows::Win32::Storage::FileSystem::FILE_SHARE_MODE(0),
-                None,
-                OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS,
-                None,
-            )
-            .unwrap()
-        });
+        let root_lock = hold(&target, FILE_SHARE_MODE(0));
         assert_eq!(
             scan("user-temp", &roots, time, &stop),
             ScanResult::Failed {
@@ -1118,20 +1043,7 @@ mod tests {
         );
         drop(root_lock);
 
-        let child_name = wide(blocked.as_os_str());
-        // SAFETY: the terminated path names a live fixture directory.
-        let child_lock = OwnedHandle(unsafe {
-            CreateFileW(
-                PCWSTR(child_name.as_ptr()),
-                windows::Win32::Foundation::GENERIC_READ.0,
-                windows::Win32::Storage::FileSystem::FILE_SHARE_MODE(0),
-                None,
-                OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS,
-                None,
-            )
-            .unwrap()
-        });
+        let child_lock = hold(&blocked, FILE_SHARE_MODE(0));
         assert_eq!(
             scan("user-temp", &roots, time, &stop),
             ScanResult::Partial {
@@ -1140,6 +1052,16 @@ mod tests {
             }
         );
         drop(child_lock);
+    }
+
+    #[test]
+    fn win32_api_errors_classify_like_nt_errors() {
+        let error = os_error(windows::core::Error::from(ERROR_SHARING_VIOLATION));
+        assert_eq!(classify(&error), Problem::SharingViolation);
+        assert_eq!(
+            win32_code(&os_error(ERROR_DIR_NOT_EMPTY.into())),
+            Some(ERROR_DIR_NOT_EMPTY)
+        );
     }
 
     #[test]

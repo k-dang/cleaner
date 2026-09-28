@@ -10,7 +10,7 @@ mod ui;
 use std::rc::Rc;
 
 use gpui::{AppContext, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions};
-use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
+use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
 use windows::core::{HSTRING, w};
@@ -24,18 +24,14 @@ pub fn run() {
     }));
     // The supported build runs under one local account. A global mutex also
     // excludes another session of that account from overlapping filesystem work.
-    // SAFETY: the constant name is terminated and the mutex remains open until exit.
-    let instance = match unsafe { CreateMutexW(None, true, w!("Global\\cc-cleaner-at-home")) } {
-        Ok(handle) => handle,
-        Err(error) => return show_error(&format!("Cleaner could not start.\n\n{error}")),
-    };
+    // The handle is never closed, so the mutex is held until the process exits.
+    // SAFETY: the constant name is terminated.
+    if let Err(error) = unsafe { CreateMutexW(None, true, w!("Global\\cc-cleaner-at-home")) } {
+        return show_error(&format!("Cleaner could not start.\n\n{error}"));
+    }
     // SAFETY: GetLastError reads this thread's last Win32 error immediately
     // after CreateMutexW.
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-        // SAFETY: this is the mutex handle returned by CreateMutexW.
-        unsafe {
-            let _ = CloseHandle(instance);
-        }
         return show_error("Cleaner is already running.");
     }
     let platform = match gpui_windows::WindowsPlatform::new(false) {
@@ -69,10 +65,6 @@ pub fn run() {
         }
         cx.on_window_closed(|cx, _| cx.quit()).detach();
     });
-    // SAFETY: this is the mutex handle returned by CreateMutexW.
-    unsafe {
-        let _ = CloseHandle(instance);
-    }
 }
 
 /// Reports a fatal error, such as unsupported graphics or a panic, since the app has no console.
