@@ -396,7 +396,7 @@ impl CleanerView {
             .iter()
             .filter(|row| matches!(row.scan, Some(ScanResult::Complete { bytes }) if bytes > 0))
             .count();
-        let selected = rows.iter().filter(|row| row.selected).count();
+        let selected = visible_selection_count(rows);
         let overview = if totals.scanning {
             format!("{} found so far", format::size(totals.complete_bytes))
         } else if found == 0 && totals.incomplete == 0 {
@@ -965,6 +965,14 @@ fn is_hidden(row: &Row) -> bool {
     row.scan == Some(ScanResult::NotPresent) && row.clean.is_none()
 }
 
+/// Counts the checked rows currently shown in the checklist. An absent Target
+/// can remain in the saved Selection without appearing as a checkbox.
+fn visible_selection_count(rows: &[Row]) -> usize {
+    rows.iter()
+        .filter(|row| row.selected && !is_hidden(row))
+        .count()
+}
+
 /// The shown rows' indices under each Category heading, in checklist order.
 /// Absent Targets are hidden, and so is a Category with no shown rows.
 fn sections(rows: &[Row]) -> Vec<(Category, Vec<usize>)> {
@@ -1121,7 +1129,7 @@ mod tests {
 
     #[test]
     fn absent_targets_and_empty_categories_are_hidden() {
-        let rows: Vec<Row> = TARGETS
+        let mut rows: Vec<Row> = TARGETS
             .iter()
             .map(|target| Row {
                 target,
@@ -1133,6 +1141,9 @@ mod tests {
                 clean: None,
             })
             .collect();
+        assert_eq!(visible_selection_count(&rows), TARGETS.len() - 2);
+        rows[0].selected = false;
+        assert_eq!(visible_selection_count(&rows), TARGETS.len() - 3);
         let shown: Vec<(&str, Vec<&str>)> = sections(&rows)
             .into_iter()
             .map(|(category, indices)| {
