@@ -33,7 +33,7 @@ use crate::core::{self, Roots};
 use crate::format;
 use crate::results::{CleanStatus, ScanResult};
 use crate::selection::{self, Choices, SelectionStore};
-use crate::targets::TargetId;
+use crate::targets::{Category, TargetId};
 use crate::theme::{self, System, Theme};
 
 actions!(cleaner, [FocusNext, FocusPrev]);
@@ -468,20 +468,17 @@ impl CleanerView {
         let rows = self.controller.rows();
         let mut children: Vec<AnyElement> = Vec::new();
         let mut row_children = vec![None; rows.len()];
-        let shown: Vec<usize> = (0..rows.len())
-            .filter(|&ix| !is_hidden(&rows[ix]))
-            .collect();
-        if !shown.is_empty() {
+        for (heading, (category, shown)) in sections(rows).into_iter().enumerate() {
             children.push(
                 div()
-                    .id("heading")
+                    .id(("heading", heading))
                     .role(Role::Heading)
                     .aria_level(2)
-                    .aria_label("Windows")
+                    .aria_label(category.name())
                     .pt(rems(1.14))
                     .pb(rems(0.57))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("Windows")
+                    .child(category.name())
                     .into_any_element(),
             );
             for (pos, &ix) in shown.iter().enumerate() {
@@ -906,6 +903,20 @@ fn is_hidden(row: &Row) -> bool {
     row.scan == Some(ScanResult::NotPresent) && row.clean.is_none()
 }
 
+/// The shown rows' indices under each Category heading, in checklist order.
+/// Absent Targets are hidden, and so is a Category with no shown rows.
+fn sections(rows: &[Row]) -> Vec<(Category, Vec<usize>)> {
+    Category::ALL
+        .into_iter()
+        .filter_map(|category| {
+            let shown: Vec<usize> = (0..rows.len())
+                .filter(|&ix| rows[ix].target.category == category && !is_hidden(&rows[ix]))
+                .collect();
+            (!shown.is_empty()).then_some((category, shown))
+        })
+        .collect()
+}
+
 struct RowStatus {
     value: String,
     value_color: Hsla,
@@ -1064,5 +1075,47 @@ impl Render for Tooltip {
             .text_color(t.text)
             .text_size(rems(0.86))
             .child(self.text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::targets::TARGETS;
+
+    #[test]
+    fn absent_targets_and_empty_categories_are_hidden() {
+        let rows: Vec<Row> = TARGETS
+            .iter()
+            .map(|target| Row {
+                target,
+                selected: true,
+                scan: Some(match target.id {
+                    "chrome-cache" | "directx-shader-cache" => ScanResult::NotPresent,
+                    _ => ScanResult::Complete { bytes: 1 },
+                }),
+                clean: None,
+            })
+            .collect();
+        let shown: Vec<(&str, Vec<&str>)> = sections(&rows)
+            .into_iter()
+            .map(|(category, indices)| {
+                (
+                    category.name(),
+                    indices.iter().map(|&ix| rows[ix].target.id).collect(),
+                )
+            })
+            .collect();
+        let headings: Vec<&str> = shown.iter().map(|(name, _)| *name).collect();
+        assert_eq!(headings, ["Windows", "Developer"]);
+        assert_eq!(
+            shown[0].1,
+            [
+                "user-temp",
+                "windows-temp",
+                "thumbnail-cache",
+                "crash-dumps"
+            ]
+        );
     }
 }

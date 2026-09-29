@@ -2,13 +2,14 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
-use std::os::windows::fs::MetadataExt;
+use std::io::{self, Read, Write};
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use windows::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_REPARSE_POINT, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
 use windows::core::HSTRING;
 
@@ -49,8 +50,14 @@ impl SelectionStore {
         if let Some(parent) = self.path.parent() {
             reject_redirected(parent)?;
         }
-        let contents = match fs::read(&self.path) {
-            Ok(contents) => contents,
+        let mut file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+            // Delete sharing lets a save replace the file while it is read.
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+            .open(&self.path)
+        {
+            Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(Loaded {
                     choices: defaults(),
@@ -59,6 +66,16 @@ impl SelectionStore {
             }
             Err(error) => return Err(error),
         };
+        // Inspect the same handle we read, so a replaced or dangling link cannot
+        // redirect the read or be mistaken for an absent Selection.
+        if file.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Selection file is redirected",
+            ));
+        }
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents)?;
         let value: serde_json::Value = serde_json::from_slice(&contents)?;
         let object = value.as_object().ok_or_else(|| {
             io::Error::new(
@@ -257,6 +274,34 @@ mod tests {
         assert!(store.save(&changed).is_err());
         assert_eq!(store.load().unwrap().choices, original);
         fs::set_permissions(&store.path, original_permissions).unwrap();
+    }
+
+    #[test]
+    fn load_shares_delete_access_with_other_handles() {
+        let (_dir, store) = store();
+        let mut choices = defaults();
+        choices.insert("user-temp".into(), false);
+        store.save(&choices).unwrap();
+        // Another handle that may delete or replace the file, such as a pending save.
+        let _other = OpenOptions::new()
+            .access_mode(windows::Win32::Storage::FileSystem::DELETE.0)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+            .open(&store.path)
+            .unwrap();
+        assert_eq!(store.load().unwrap().choices, choices);
+    }
+
+    #[test]
+    fn redirected_selection_file_is_a_load_error_even_when_dangling() {
+        let (dir, store) = store();
+        let destination = dir.path().join("saved.json");
+        fs::write(&destination, br#"{"user-temp":false}"#).unwrap();
+        std::os::windows::fs::symlink_file(&destination, &store.path).unwrap();
+        let existing = store.load();
+        fs::remove_file(&destination).unwrap();
+        let dangling = store.load();
+        assert!(existing.is_err(), "redirected Selection was read");
+        assert!(dangling.is_err(), "dangling Selection restored defaults");
     }
 
     #[test]
