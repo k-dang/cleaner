@@ -1,4 +1,4 @@
-//! The single cleaner screen: the estimated total and Rescan on top, the
+//! The single cleaner screen: the selected estimate and Rescan on top, the
 //! scrolling checklist in the middle, and Clean with the last result at the
 //! bottom. It renders controller state and forwards user actions.
 
@@ -10,10 +10,10 @@ use std::time::SystemTime;
 
 use futures::StreamExt;
 use gpui::{
-    AccessibleAction, AnyElement, App, AppContext, ClickEvent, Context, Div, FocusHandle,
-    FontWeight, Hsla, InteractiveElement, IntoElement, KeyboardButton, KeyboardClickEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Render, Role, ScrollHandle,
-    Size, Stateful, StatefulInteractiveElement, Styled, Subscription, Toggled, Window, accesskit,
+    AccessibleAction, AnyElement, ClickEvent, Context, Div, FocusHandle, FontWeight, Hsla,
+    InteractiveElement, IntoElement, KeyboardButton, KeyboardClickEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Render, Role, ScrollHandle, Size,
+    Stateful, StatefulInteractiveElement, Styled, Subscription, Toggled, Window, accesskit,
     actions, div, point, prelude::FluentBuilder, px, rems, size,
 };
 
@@ -392,13 +392,25 @@ impl CleanerView {
         let t = self.system.theme;
         let totals = self.controller.totals();
         let rows = self.controller.rows();
-        let caption = if totals.scanning {
-            "Found so far"
+        let found = rows
+            .iter()
+            .filter(|row| matches!(row.scan, Some(ScanResult::Complete { bytes }) if bytes > 0))
+            .count();
+        let selected = rows.iter().filter(|row| row.selected).count();
+        let overview = if totals.scanning {
+            format!("{} found so far", format::size(totals.complete_bytes))
+        } else if found == 0 && totals.incomplete == 0 {
+            "No eligible files found".to_string()
+        } else if found == 0 {
+            "No complete estimates available".to_string()
         } else {
-            "Estimated total"
+            format!(
+                "{} estimated across {}",
+                format::size(totals.complete_bytes),
+                format::plural(found as u64, "Target")
+            )
         };
-        let total = format::size(totals.complete_bytes);
-        let note = if totals.scanning {
+        let scan_note = if totals.scanning {
             let scanned = rows.iter().filter(|r| r.scan.is_some()).count();
             format!("Scanning… {scanned} of {} Targets scanned", rows.len())
         } else if totals.incomplete > 0 {
@@ -409,6 +421,18 @@ impl CleanerView {
         } else {
             "Scan complete".to_string()
         };
+        let note = format!(
+            "{} selected · {scan_note}",
+            format::plural(selected as u64, "Target")
+        );
+        let selected_estimate = if totals.scanning
+            && totals.selected_bytes == 0
+            && rows.iter().any(|row| row.selected && row.scan.is_none())
+        {
+            "—".to_string()
+        } else {
+            format::size(totals.selected_bytes)
+        };
         let idle = self.controller.can_scan();
         let scrolled = self.list.offset().y < px(0.);
 
@@ -418,8 +442,8 @@ impl CleanerView {
             .justify_between()
             .gap(rems(1.))
             .px(rems(1.43))
-            .pt(rems(1.14))
-            .pb(rems(0.86))
+            .pt(rems(1.43))
+            .pb(rems(1.14))
             .border_b_1()
             .border_color(if scrolled {
                 t.divider
@@ -431,25 +455,58 @@ impl CleanerView {
                     .id("total")
                     .role(Role::Label)
                     // Labels take their accessible name from their value.
-                    .aria_value(format!("{caption}: {total}. {note}"))
+                    .aria_value(format!(
+                        "Selected estimate: {selected_estimate}. {overview}. {note}"
+                    ))
                     .flex()
                     .flex_col()
-                    .child(div().text_color(t.text_secondary).child(caption))
                     .child(
                         div()
                             .font_family(DISPLAY_FONT)
-                            .text_size(rems(2.))
-                            .line_height(rems(2.57))
+                            .text_size(rems(1.64))
+                            .line_height(rems(1.86))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(total),
+                            .child("Review your cleanup"),
                     )
-                    .child(div().text_color(t.text_secondary).child(note)),
+                    .child(div().text_color(t.text_secondary).child(overview))
+                    .child(
+                        div()
+                            .pt(rems(0.86))
+                            .flex()
+                            .items_baseline()
+                            .gap(rems(0.71))
+                            .font_family(DISPLAY_FONT)
+                            .child(
+                                div()
+                                    .text_size(rems(2.86))
+                                    .line_height(rems(3.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(selected_estimate),
+                            )
+                            .child(
+                                div()
+                                    .text_size(rems(0.86))
+                                    .text_color(t.text_secondary)
+                                    .child("selected estimate"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(rems(0.86))
+                            .text_color(t.text_secondary)
+                            .child(note),
+                    ),
             )
             .child(
                 self.subtle_button("rescan", &self.rescan_focus, idle, window)
                     .aria_label("Rescan")
-                    .tooltip(tooltip("Rescan", t))
-                    .size(rems(2.29))
+                    .gap(rems(0.43))
+                    .px(rems(0.71))
+                    .h(rems(2.43))
+                    .border_1()
+                    .border_color(t.card_stroke)
+                    .bg(t.card)
+                    .text_color(if idle { t.text } else { t.text_disabled })
                     .when(idle, |b| {
                         b.on_click(cx.listener(|this, _, _, cx| this.rescan(cx)))
                     })
@@ -457,7 +514,8 @@ impl CleanerView {
                         ICON_REFRESH,
                         rems(1.14),
                         if idle { t.text } else { t.text_disabled },
-                    )),
+                    ))
+                    .child("Rescan"),
             )
     }
 
@@ -550,13 +608,13 @@ impl CleanerView {
             .items_center()
             .gap(rems(0.86))
             .px(rems(1.14))
-            .py(rems(0.57))
-            .min_h(rems(3.))
+            .py(rems(0.71))
+            .min_h(rems(3.29))
             .bg(t.card)
             .border_color(t.card_stroke)
             .border_x_1()
-            .when(first, |d| d.border_t_1().rounded_t(px(4.)))
-            .when(last, |d| d.border_b_1().rounded_b(px(4.)))
+            .when(first, |d| d.border_t_1().rounded_t(px(7.)))
+            .when(last, |d| d.border_b_1().rounded_b(px(7.)))
             .when(!first, |d| {
                 d.child(
                     div()
@@ -735,7 +793,7 @@ impl CleanerView {
                             .min_w_0()
                             .text_size(rems(0.86))
                             .text_color(t.text_secondary)
-                            .child("Sizes are estimates. Deleted file sizes can differ from the disk space reclaimed."),
+                            .child("Clean permanently deletes eligible files. Reclaimed space may differ from estimates."),
                     )
                     .child(
                         div()
@@ -765,7 +823,11 @@ impl CleanerView {
                                 b.bg(t.accent_disabled).text_color(t.on_accent_disabled)
                             })
                             .when(t.high_contrast, |b| {
-                                b.border_1().border_color(if enabled { t.on_accent } else { t.text_disabled })
+                                b.border_1().border_color(if enabled {
+                                    t.on_accent
+                                } else {
+                                    t.text_disabled
+                                })
                             })
                             .child(label)
                             .when(ring, |b| b.child(focus_ring(&t, px(-3.), px(7.)))),
@@ -1050,32 +1112,6 @@ fn focus_ring(t: &Theme, inset: Pixels, radius: Pixels) -> Div {
         .border_2()
         .border_color(t.focus)
         .rounded(radius)
-}
-
-fn tooltip(text: &'static str, theme: Theme) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView {
-    move |_, cx| cx.new(|_| Tooltip { text, theme }).into()
-}
-
-struct Tooltip {
-    text: &'static str,
-    theme: Theme,
-}
-
-impl Render for Tooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let t = self.theme;
-        div()
-            .font_family(TEXT_FONT)
-            .px(rems(0.57))
-            .py(rems(0.29))
-            .rounded(px(4.))
-            .bg(t.card)
-            .border_1()
-            .border_color(t.card_stroke)
-            .text_color(t.text)
-            .text_size(rems(0.86))
-            .child(self.text)
-    }
 }
 
 #[cfg(test)]
