@@ -4,7 +4,7 @@ A portable Windows 11 app for reviewing and permanently deleting caches and disc
 
 ## Current scope
 
-The worker supports the folder Targets in `src/targets.rs`: the two temp folders, thumbnail and icon caches, crash dumps and error reports, the DirectX shader cache, Chrome's cache, and the npm, pnpm, pip, and Go caches. The two temp Targets keep only files last modified more than 24 hours before the operation starts, and Clean rechecks their age. The Minimum age reduces risk but does not prove that a file is unused. Rejected deletions are skipped and reported. The Recycle Bin Target is not built yet.
+The worker supports the folder Targets in `src/targets.rs`: the two temp folders, the thumbnail cache, crash dumps and error reports, the DirectX shader cache, Chrome's cache, and the pnpm, pip, and Go caches. The two temp Targets keep only files last modified more than 24 hours before the operation starts, and Clean rechecks their age. The Minimum age reduces risk but does not prove that a file is unused. Rejected deletions are skipped and reported. The Recycle Bin Target is not built yet.
 
 The app saves explicit ticks and unticks in `%APPDATA%\cc-cleaner-at-home\selection.json`. A malformed or unreadable Selection starts with every Target unticked. The app shows save errors and rolls back a failed change.
 

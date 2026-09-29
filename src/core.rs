@@ -582,10 +582,11 @@ impl<'a> Walk<'a> {
             Folders::Files {
                 base,
                 path,
-                patterns,
+                prefix,
+                suffix,
             } => {
                 if let Some(root) = self.open_root(roots, base, path) {
-                    self.files(root.target(), patterns);
+                    self.files(root.target(), prefix, suffix);
                 }
             }
             Folders::Profiles { base, path, caches } => {
@@ -678,15 +679,15 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// Handles the immediate files of `directory` named by `patterns`, ignoring
+    /// Handles the immediate files of `directory` named `prefix*suffix`, ignoring
     /// every other entry and all descendants.
-    fn files(&mut self, directory: &OwnedHandle, patterns: &[(&str, &str)]) {
+    fn files(&mut self, directory: &OwnedHandle, prefix: &str, suffix: &str) {
         let Some(children) = self.list(directory) else {
             return;
         };
         self.visited = true;
         for child in children {
-            if child.directory || !matches_any(patterns, &child.name) {
+            if child.directory || !matches(&child.name, prefix, suffix) {
                 continue;
             }
             if self.stopping() {
@@ -828,20 +829,18 @@ impl<'a> Walk<'a> {
     }
 }
 
-/// True when `name` is `prefix*suffix` for one of `patterns`, ignoring ASCII case.
-fn matches_any(patterns: &[(&str, &str)], name: &OsStr) -> bool {
+/// True when `name` is `prefix*suffix`, ignoring ASCII case.
+fn matches(name: &OsStr, prefix: &str, suffix: &str) -> bool {
     let Some(name) = name.to_str() else {
         return false;
     };
-    patterns.iter().any(|(prefix, suffix)| {
-        name.len() >= prefix.len() + suffix.len()
-            && name
-                .get(..prefix.len())
-                .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
-            && name
-                .get(name.len() - suffix.len()..)
-                .is_some_and(|end| end.eq_ignore_ascii_case(suffix))
-    })
+    name.len() >= prefix.len() + suffix.len()
+        && name
+            .get(..prefix.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+        && name
+            .get(name.len() - suffix.len()..)
+            .is_some_and(|end| end.eq_ignore_ascii_case(suffix))
 }
 
 /// Scan one built-in Target at a fixed operation time.
@@ -1377,9 +1376,10 @@ mod tests {
         let (_dir, roots, _, time) = fixture();
         let explorer = folder(&roots, Base::LocalAppData, r"Microsoft\Windows\Explorer");
         // No Minimum age applies, so a file written just now is eligible.
-        put(&explorer.join("ICONCACHE_48.DB"), b"icon");
+        put(&explorer.join("THUMBCACHE_48.DB"), b"thumb");
         write_at(&explorer.join("thumbcache_256.db"), b"thumb", time);
         let kept = [
+            explorer.join("iconcache_48.db"),
             explorer.join("ExplorerStartupLog.etl"),
             explorer.join("thumbcache_256.db.bak"),
             explorer.join(r"nested\thumbcache_32.db"),
@@ -1387,19 +1387,19 @@ mod tests {
         for path in &kept {
             put(path, b"keep");
         }
-        fs::create_dir(explorer.join("iconcache_dir.db")).unwrap();
+        fs::create_dir(explorer.join("thumbcache_dir.db")).unwrap();
         let stop = AtomicBool::new(false);
         assert_eq!(
             scan("thumbnail-cache", &roots, time, &stop),
-            ScanResult::Complete { bytes: 9 }
+            ScanResult::Complete { bytes: 10 }
         );
         let cleaned = clean("thumbnail-cache", &roots, time, &stop);
         assert_eq!(cleaned.status, CleanStatus::Complete);
-        assert_eq!(cleaned.deleted_bytes, 9);
+        assert_eq!(cleaned.deleted_bytes, 10);
         assert!(!explorer.join("thumbcache_256.db").exists());
-        assert!(!explorer.join("ICONCACHE_48.DB").exists());
+        assert!(!explorer.join("THUMBCACHE_48.DB").exists());
         assert!(kept.iter().all(|path| path.exists()));
-        assert!(explorer.join("iconcache_dir.db").is_dir());
+        assert!(explorer.join("thumbcache_dir.db").is_dir());
     }
 
     #[test]

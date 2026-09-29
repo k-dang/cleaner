@@ -1,10 +1,18 @@
 """Owner-behavior check for a Chromium browser's profile caches. Uses a scratch
---user-data-dir so the real profile is never touched. Needs network access.
-Usage: browser.py <browser exe> <scratch dir>"""
-import os, random, shutil, subprocess, sys, time
+--user-data-dir under OWNER_CHECK_DIR, so the real profile is never touched.
+Needs network access. Usage: browser.py <browser exe>"""
+import os, random, shutil, subprocess, sys, tempfile, time
 
-exe, base = sys.argv[1], sys.argv[2]
+exe = sys.argv[1]
+root = os.environ.get("OWNER_CHECK_DIR") or os.path.join(tempfile.gettempdir(), "cleaner-owner-checks")
+base = os.path.join(root, "browser-" + os.path.splitext(os.path.basename(exe))[0])
+marker = os.path.join(base, ".cleaner-owner-check")
+# Refuse to delete an existing folder that an owner check did not create.
+if os.path.exists(base) and not os.path.exists(marker):
+    sys.exit(f"refusing to delete {base}: it was not created by an owner check")
 shutil.rmtree(base, ignore_errors=True)
+os.makedirs(base)
+open(marker, "w").close()
 data = os.path.join(base, "User Data")
 caches = [os.path.join(data, "Default", c) for c in ("Cache", "Code Cache", "GPUCache")]
 pages = ["https://example.com", "https://www.wikipedia.org", "https://developer.mozilla.org/en-US/"]

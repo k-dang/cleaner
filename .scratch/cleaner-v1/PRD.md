@@ -33,7 +33,7 @@ Each Target has a verified cleanup procedure. Cache files can be needed by runni
 15. As Kevin, I want temp files modified within the last 24 hours kept, so that recent working files are excluded from routine cleanup.
 16. As Kevin, I want permanent deletion and a Recycle Bin Target, so that cleanup does not just move files into the Recycle Bin.
 17. As Kevin, I want supported browser caches cleaned across their standard profiles while user data stays untouched.
-18. As Kevin, I want thumbnail and icon caches, crash dumps, shader caches, and supported developer caches available as Targets, so that I can review the main sources of disk use.
+18. As Kevin, I want thumbnail caches, crash dumps, shader caches, and supported developer caches available as Targets, so that I can review the main sources of disk use.
 19. As Kevin, I want cleanup confined to the listed Target contents even if a path is redirected or changes during the operation, so that it cannot delete content elsewhere.
 20. As Kevin, I want to close the window to stop further cleanup, so that the app can exit after any operation already in progress finishes.
 21. As Kevin, I want one portable executable with no network calls or downloaded runtime, so that I can use it offline without an installer.
@@ -138,11 +138,10 @@ Only standard local locations are supported. Custom cache directories and browse
 | Windows | User temp | `LocalAppData\Temp` | 24 hours | Ticked |
 | Windows | Windows temp | `WinDir\Temp` | 24 hours | Ticked |
 | Windows | Recycle Bin | Windows shell API, local fixed drives | - | Ticked |
-| Windows | Thumbnail and icon cache | `LocalAppData\Microsoft\Windows\Explorer`, immediate `thumbcache_*.db` and `iconcache_*.db` only | - | Ticked |
+| Windows | Thumbnail cache | `LocalAppData\Microsoft\Windows\Explorer`, immediate `thumbcache_*.db` only | - | Ticked |
 | Windows | Crash dumps and error reports | `LocalAppData\CrashDumps`, `LocalAppData\Microsoft\Windows\WER`, `ProgramData\Microsoft\Windows\WER\ReportArchive`, `ProgramData\Microsoft\Windows\WER\ReportQueue` | - | Ticked |
 | Windows | DirectX shader cache | `LocalAppData\D3DSCache` | - | Unticked |
 | Browsers | Chrome cache | `LocalAppData\Google\Chrome\User Data\<profile>\{Cache, Code Cache, GPUCache}` | - | Ticked |
-| Developer | npm cache | `LocalAppData\npm-cache` | - | Unticked |
 | Developer | pnpm store | `LocalAppData\pnpm\store` | - | Unticked |
 | Developer | pip cache | `LocalAppData\pip\cache` | - | Unticked |
 | Developer | Go build cache | `LocalAppData\go-build` | - | Unticked |

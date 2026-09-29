@@ -7,7 +7,11 @@ set -u
 tool=$1 damage=$2 fraction=$3
 here=$(cd "$(dirname "$0")" && pwd)
 base=${OWNER_CHECK_DIR:-${TMP:-/tmp}/cleaner-owner-checks}/$tool-${damage%.py}-$fraction
-rm -rf "$base"; mkdir -p "$base"
+# Refuse to delete an existing folder that an owner check did not create.
+if [ -e "$base" ] && [ ! -e "$base/.cleaner-owner-check" ]; then
+  echo "refusing to delete $base: it was not created by an owner check" >&2; exit 1
+fi
+rm -rf "$base"; mkdir -p "$base"; touch "$base/.cleaner-owner-check"
 cache="$base/cache"
 pkgs="lodash@4.17.21 chalk@5.3.0 typescript@5.4.5"
 

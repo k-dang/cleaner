@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use windows::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
 use windows::core::HSTRING;
 
@@ -53,7 +53,8 @@ impl SelectionStore {
         let mut file = match OpenOptions::new()
             .read(true)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
-            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
+            // Delete sharing lets a save replace the file while it is read.
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
             .open(&self.path)
         {
             Ok(file) => file,
@@ -273,6 +274,21 @@ mod tests {
         assert!(store.save(&changed).is_err());
         assert_eq!(store.load().unwrap().choices, original);
         fs::set_permissions(&store.path, original_permissions).unwrap();
+    }
+
+    #[test]
+    fn load_shares_delete_access_with_other_handles() {
+        let (_dir, store) = store();
+        let mut choices = defaults();
+        choices.insert("user-temp".into(), false);
+        store.save(&choices).unwrap();
+        // Another handle that may delete or replace the file, such as a pending save.
+        let _other = OpenOptions::new()
+            .access_mode(windows::Win32::Storage::FileSystem::DELETE.0)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+            .open(&store.path)
+            .unwrap();
+        assert_eq!(store.load().unwrap().choices, choices);
     }
 
     #[test]

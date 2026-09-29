@@ -57,7 +57,8 @@ pub enum Folders {
     Files {
         base: Base,
         path: &'static str,
-        patterns: &'static [(&'static str, &'static str)],
+        prefix: &'static str,
+        suffix: &'static str,
     },
     /// Everything inside the fixed `caches` folders of each Chromium profile
     /// directly under `path`.
@@ -89,7 +90,7 @@ pub fn find(id: &str) -> Option<&'static Target> {
 
 // Admission evidence for each Target is recorded in
 // `.scratch/cleaner-v1/issues/03-add-folder-based-targets.md`.
-pub static TARGETS: [Target; 10] = [
+pub static TARGETS: [Target; 9] = [
     Target {
         id: "user-temp",
         name: "User temp",
@@ -108,14 +109,15 @@ pub static TARGETS: [Target; 10] = [
     },
     Target {
         id: "thumbnail-cache",
-        name: "Thumbnail and icon cache",
+        name: "Thumbnail cache",
         category: Category::Windows,
         default_selected: true,
         min_age: None,
         folders: Folders::Files {
             base: Base::LocalAppData,
             path: r"Microsoft\Windows\Explorer",
-            patterns: &[("thumbcache_", ".db"), ("iconcache_", ".db")],
+            prefix: "thumbcache_",
+            suffix: ".db",
         },
     },
     Target {
@@ -150,14 +152,6 @@ pub static TARGETS: [Target; 10] = [
             path: r"Google\Chrome\User Data",
             caches: &["Cache", "Code Cache", "GPUCache"],
         },
-    },
-    Target {
-        id: "npm-cache",
-        name: "npm cache",
-        category: Category::Developer,
-        default_selected: false,
-        min_age: None,
-        folders: Folders::Trees(&[(Base::LocalAppData, "npm-cache")]),
     },
     Target {
         id: "pnpm-store",
