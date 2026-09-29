@@ -1,4 +1,4 @@
-//! Handle-relative traversal for the two admitted temp Targets.
+//! Handle-relative traversal for the built-in folder Targets.
 //! All child opens are relative to a verified parent handle. A name seen in a
 //! directory listing is never later resolved through an absolute path.
 
@@ -34,13 +34,14 @@ use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUn
 use windows::Win32::System::IO::IO_STATUS_BLOCK;
 use windows::Win32::System::SystemServices::{IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK};
 use windows::Win32::System::WindowsProgramming::DRIVE_FIXED;
-use windows::Win32::UI::Shell::{FOLDERID_LocalAppData, FOLDERID_Windows, SHGetKnownFolderPath};
+use windows::Win32::UI::Shell::{
+    FOLDERID_LocalAppData, FOLDERID_ProgramData, FOLDERID_Windows, KF_FLAG_DONT_VERIFY,
+    SHGetKnownFolderPath,
+};
 use windows::core::{GUID, HSTRING, PWSTR};
 
 use crate::results::{CleanResult, CleanStatus, Problem, ScanResult, add_count};
-use crate::targets::TargetId;
-
-const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+use crate::targets::{self, Base, Folders, Target, TargetId};
 
 struct OwnedHandle(HANDLE);
 
@@ -65,10 +66,12 @@ impl Drop for OwnedHandle {
 // stays unique and Drop closes it once.
 unsafe impl Send for OwnedHandle {}
 
-/// Production roots come from Windows known-folder APIs. Tests use fixture roots.
+/// The known folders Target paths are relative to. Production roots come from
+/// Windows known-folder APIs. Tests use fixture roots.
 pub struct Roots {
     local_app_data: Result<PathBuf, Problem>,
     win_dir: Result<PathBuf, Problem>,
+    program_data: Result<PathBuf, Problem>,
 }
 
 impl Roots {
@@ -76,6 +79,7 @@ impl Roots {
         Self::resolve(known_folder)
     }
 
+    /// A root that fails to resolve fails only the Targets that use it.
     fn resolve(mut folder: impl FnMut(&GUID) -> io::Result<PathBuf>) -> Self {
         let mut root = |id| {
             folder(id)
@@ -85,23 +89,22 @@ impl Roots {
         Self {
             local_app_data: root(&FOLDERID_LocalAppData),
             win_dir: root(&FOLDERID_Windows),
+            program_data: root(&FOLDERID_ProgramData),
         }
     }
 
-    fn path(&self, id: TargetId) -> Result<PathBuf, Problem> {
-        let root = match id {
-            "user-temp" => &self.local_app_data,
-            "windows-temp" => &self.win_dir,
-            _ => return Err(Problem::Other),
+    fn base(&self, base: Base) -> Result<&Path, Problem> {
+        let root = match base {
+            Base::LocalAppData => &self.local_app_data,
+            Base::WinDir => &self.win_dir,
+            Base::ProgramData => &self.program_data,
         };
-        root.as_ref()
-            .map(|path| path.join("Temp"))
-            .map_err(|problem| *problem)
+        root.as_deref().map_err(|problem| *problem)
     }
 
-    /// Opens a Target's folder. `None` means it is confirmed absent.
-    fn open(&self, id: TargetId) -> Result<Option<RootHandles>, Problem> {
-        root_handle(&self.path(id)?).map_err(|error| root_problem(&error))
+    /// Opens a Target folder. `None` means it is confirmed absent.
+    fn open(&self, base: Base, path: &str) -> Result<Option<RootHandles>, Problem> {
+        root_handle(&self.base(base)?.join(path)).map_err(|error| root_problem(&error))
     }
 }
 
@@ -139,8 +142,9 @@ fn known_folder(id: &GUID) -> io::Result<PathBuf> {
 }
 
 fn known_folder_initialized(id: &GUID) -> io::Result<PathBuf> {
+    // Resolve only: validate_folder rejects nonlocal paths before checking existence.
     // SAFETY: Shell returns a terminated path that remains allocated until freed below.
-    let path = unsafe { SHGetKnownFolderPath(id, Default::default(), None) }.map_err(os_error)?;
+    let path = unsafe { SHGetKnownFolderPath(id, KF_FLAG_DONT_VERIFY, None) }.map_err(os_error)?;
     // SAFETY: the shell returned a valid terminated UTF-16 buffer.
     let result = unsafe { path.to_string() }
         .map(PathBuf::from)
@@ -319,20 +323,29 @@ fn root_handle(path: &Path) -> io::Result<Option<RootHandles>> {
                 "invalid Target path",
             ));
         };
-        let current = match relative_open(handles.last().unwrap(), name, true, false) {
-            Ok(handle) => handle,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        if is_reparse(&info(&current, FileAttributeTagInfo)?) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "redirected folder",
-            ));
+        match open_dir(handles.last().unwrap(), name)? {
+            Some(current) => handles.push(current),
+            None => return Ok(None),
         }
-        handles.push(current);
     }
     Ok(Some(RootHandles(handles)))
+}
+
+/// Opens an ordinary child directory. `None` means it is absent; a redirected
+/// directory is an `InvalidData` error.
+fn open_dir(parent: &OwnedHandle, name: &OsStr) -> io::Result<Option<OwnedHandle>> {
+    let child = match relative_open(parent, name, true, false) {
+        Ok(handle) => handle,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if is_reparse(&info(&child, FileAttributeTagInfo)?) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "redirected folder",
+        ));
+    }
+    Ok(Some(child))
 }
 
 fn root_problem(error: &io::Error) -> Problem {
@@ -343,28 +356,31 @@ fn root_problem(error: &io::Error) -> Problem {
     }
 }
 
-fn cutoff(time: SystemTime) -> i64 {
+/// The FILETIME a file must be modified strictly before to be `min_age` old at `time`.
+fn cutoff(time: SystemTime, min_age: Duration) -> i64 {
     let duration = time
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .saturating_sub(DAY);
+        .saturating_sub(min_age);
     // Windows FILETIME counts 100 ns intervals from 1601-01-01.
     let ticks = duration.as_nanos() / 100 + 116_444_736_000_000_000;
     i64::try_from(ticks).unwrap_or(i64::MAX)
 }
 
-/// The logical size of an old enough file, or `None` if it is too recent. A link
-/// counts as 0 bytes, since removing it frees nothing it points to.
-fn eligible(handle: &OwnedHandle, link: bool, cutoff: i64) -> io::Result<Option<u64>> {
-    let basic: FILE_BASIC_INFO = info(handle, FileBasicInfo)?;
-    if basic.LastWriteTime <= 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "file time unavailable",
-        ));
-    }
-    if basic.LastWriteTime >= cutoff {
-        return Ok(None);
+/// The logical size of an eligible file, or `None` if it is newer than `cutoff`.
+/// A link counts as 0 bytes, since removing it frees nothing it points to.
+fn eligible(handle: &OwnedHandle, link: bool, cutoff: Option<i64>) -> io::Result<Option<u64>> {
+    if let Some(cutoff) = cutoff {
+        let basic: FILE_BASIC_INFO = info(handle, FileBasicInfo)?;
+        if basic.LastWriteTime <= 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "file time unavailable",
+            ));
+        }
+        if basic.LastWriteTime >= cutoff {
+            return Ok(None);
+        }
     }
     if link {
         return Ok(Some(0));
@@ -488,11 +504,15 @@ fn entries(handle: &OwnedHandle, stop: &AtomicBool) -> io::Result<Vec<Entry>> {
 /// One Scan or Clean walk over a Target: its settings and what it found so far.
 struct Walk<'a> {
     clean: bool,
-    cutoff: i64,
+    /// Files modified at or after this FILETIME are kept. `None` without a Minimum age.
+    cutoff: Option<i64>,
     stop: &'a AtomicBool,
     /// Test hook, called before each child is opened.
     before_open: &'a mut dyn FnMut(&OsStr),
     bytes: u64,
+    /// True once Clean removed any file, link, or emptied directory.
+    deleted_any: bool,
+    /// True once the contents of any Target folder were listed.
     visited: bool,
     problem: Option<Problem>,
     skipped: Vec<(Problem, u64)>,
@@ -502,16 +522,18 @@ struct Walk<'a> {
 impl<'a> Walk<'a> {
     fn new(
         clean: bool,
+        target: &Target,
         time: SystemTime,
         stop: &'a AtomicBool,
         before_open: &'a mut dyn FnMut(&OsStr),
     ) -> Self {
         Self {
             clean,
-            cutoff: cutoff(time),
+            cutoff: target.min_age.map(|age| cutoff(time, age)),
             stop,
             before_open,
             bytes: 0,
+            deleted_any: false,
             visited: false,
             problem: None,
             skipped: Vec::new(),
@@ -540,21 +562,153 @@ impl<'a> Walk<'a> {
         self.stopped
     }
 
+    /// Processes every folder of `target`. An absent folder adds nothing; one
+    /// that cannot be opened safely is recorded as a problem.
+    fn target(&mut self, target: &Target, roots: &Roots) {
+        if self.stopping() {
+            return;
+        }
+        match target.folders {
+            Folders::Trees(folders) => {
+                for &(base, path) in folders {
+                    if self.stopping() {
+                        return;
+                    }
+                    if let Some(root) = self.open_root(roots, base, path) {
+                        self.walk(root.target());
+                    }
+                }
+            }
+            Folders::Files {
+                base,
+                path,
+                patterns,
+            } => {
+                if let Some(root) = self.open_root(roots, base, path) {
+                    self.files(root.target(), patterns);
+                }
+            }
+            Folders::Profiles { base, path, caches } => {
+                if let Some(root) = self.open_root(roots, base, path) {
+                    self.profiles(root.target(), caches);
+                }
+            }
+        }
+    }
+
+    fn open_root(&mut self, roots: &Roots, base: Base, path: &str) -> Option<RootHandles> {
+        roots.open(base, path).unwrap_or_else(|problem| {
+            self.problem(problem, false);
+            None
+        })
+    }
+
+    /// Opens an ordinary child directory, recording why it could not be opened.
+    fn child_dir(&mut self, parent: &OwnedHandle, name: &OsStr) -> Option<OwnedHandle> {
+        open_dir(parent, name).unwrap_or_else(|error| {
+            self.problem(root_problem(&error), false);
+            None
+        })
+    }
+
+    /// Lists a directory. `None` when it could not be listed or a stop was requested.
+    fn list(&mut self, directory: &OwnedHandle) -> Option<Vec<Entry>> {
+        match entries(directory, self.stop) {
+            Ok(children) => Some(children),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                self.stopped = true;
+                None
+            }
+            Err(error) => {
+                self.problem(classify(&error), false);
+                None
+            }
+        }
+    }
+
+    /// Opens a listed child without following a link. `Ok(None)` means it vanished;
+    /// `Err` means the failure was recorded.
+    fn open_child(
+        &mut self,
+        directory: &OwnedHandle,
+        child: &Entry,
+        delete: bool,
+    ) -> Result<Option<(OwnedHandle, FILE_ATTRIBUTE_TAG_INFO)>, ()> {
+        let opened = relative_open(directory, &child.name, child.directory, delete)
+            .and_then(|handle| Ok((info(&handle, FileAttributeTagInfo)?, handle)));
+        match opened {
+            Ok((tag, handle)) => Ok(Some((handle, tag))),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => {
+                self.problem(classify(&error), !child.directory);
+                Err(())
+            }
+        }
+    }
+
+    /// Walks the fixed cache folders inside each Chromium profile directory of
+    /// `parent`. Nothing else in a profile is visited.
+    fn profiles(&mut self, parent: &OwnedHandle, caches: &[&str]) {
+        let Some(children) = self.list(parent) else {
+            return;
+        };
+        for child in children {
+            let profile = child
+                .name
+                .to_str()
+                .is_some_and(targets::is_chromium_profile);
+            if !child.directory || !profile {
+                continue;
+            }
+            if self.stopping() {
+                return;
+            }
+            (self.before_open)(&child.name);
+            let Some(profile) = self.child_dir(parent, &child.name) else {
+                continue;
+            };
+            for cache in caches {
+                if self.stopping() {
+                    return;
+                }
+                if let Some(folder) = self.child_dir(&profile, OsStr::new(cache)) {
+                    self.walk(&folder);
+                }
+            }
+        }
+    }
+
+    /// Handles the immediate files of `directory` named by `patterns`, ignoring
+    /// every other entry and all descendants.
+    fn files(&mut self, directory: &OwnedHandle, patterns: &[(&str, &str)]) {
+        let Some(children) = self.list(directory) else {
+            return;
+        };
+        self.visited = true;
+        for child in children {
+            if child.directory || !matches_any(patterns, &child.name) {
+                continue;
+            }
+            if self.stopping() {
+                return;
+            }
+            (self.before_open)(&child.name);
+            if self.stopping() {
+                return;
+            }
+            if let Ok(Some((handle, tag))) = self.open_child(directory, &child, false) {
+                self.file(directory, &child, handle, &tag);
+            }
+        }
+    }
+
     /// Returns true when cleanup emptied `directory` and it can be pruned.
     fn walk(&mut self, directory: &OwnedHandle) -> bool {
         if self.stopping() {
             return false;
         }
-        let children = match entries(directory, self.stop) {
-            Ok(children) => children,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
-                self.stopped = true;
-                return false;
-            }
-            Err(error) => {
-                self.problem(classify(&error), false);
-                return false;
-            }
+        let Some(children) = self.list(directory) else {
+            return false;
         };
         self.visited = true;
         let mut empty = true;
@@ -567,32 +721,27 @@ impl<'a> Walk<'a> {
             if self.stopping() {
                 return false;
             }
-            let handle = match relative_open(directory, &child.name, child.directory, self.clean) {
-                Ok(handle) => handle,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(error) => {
-                    self.problem(classify(&error), !child.directory);
-                    empty = false;
-                    continue;
-                }
-            };
-            let tag: FILE_ATTRIBUTE_TAG_INFO = match info(&handle, FileAttributeTagInfo) {
-                Ok(tag) => tag,
-                Err(error) => {
-                    self.problem(classify(&error), !child.directory);
-                    empty = false;
-                    continue;
-                }
-            };
+            let (handle, tag) =
+                match self.open_child(directory, &child, self.clean && child.directory) {
+                    Ok(Some(opened)) => opened,
+                    Ok(None) => continue,
+                    Err(()) => {
+                        empty = false;
+                        continue;
+                    }
+                };
             if child.directory && !is_reparse(&tag) {
                 let child_empty = self.walk(&handle);
                 if self.stopping() {
                     return false;
                 }
                 if self.clean && child_empty {
-                    // Only empty descendants are removed. The Target root is never passed here.
+                    // Only empty descendants are removed. A Target folder is never passed here.
                     match delete(&handle) {
-                        Ok(()) => removed = true,
+                        Ok(()) => {
+                            removed = true;
+                            self.deleted_any = true;
+                        }
                         Err(error) => {
                             empty = false;
                             if win32_code(&error) != Some(ERROR_DIR_NOT_EMPTY) {
@@ -605,40 +754,94 @@ impl<'a> Walk<'a> {
                 }
                 continue;
             }
-            if is_reparse(&tag) && !is_link(&tag) {
-                self.problem(Problem::Redirected, false);
+            if self.file(directory, &child, handle, &tag) {
+                removed = true;
+            } else {
                 empty = false;
-                continue;
-            }
-            match eligible(&handle, is_link(&tag), self.cutoff) {
-                Ok(Some(bytes)) if self.clean => {
-                    if self.stopping() {
-                        return false;
-                    }
-                    match delete(&handle) {
-                        Ok(()) => {
-                            self.bytes = self.bytes.saturating_add(bytes);
-                            removed = true;
-                        }
-                        Err(error) => {
-                            self.problem(classify(&error), true);
-                            empty = false;
-                        }
-                    }
-                }
-                Ok(Some(bytes)) => {
-                    self.bytes = self.bytes.saturating_add(bytes);
-                    empty = false;
-                }
-                Ok(None) => empty = false,
-                Err(_) => {
-                    self.problem(Problem::Metadata, true);
-                    empty = false;
-                }
             }
         }
         empty && removed
     }
+
+    /// Checks both the reparse tag and Minimum age on the opened file itself.
+    fn file_bytes(&mut self, handle: &OwnedHandle, tag: &FILE_ATTRIBUTE_TAG_INFO) -> Option<u64> {
+        if is_reparse(tag) && !is_link(tag) {
+            self.problem(Problem::Redirected, false);
+            return None;
+        }
+        match eligible(handle, is_link(tag), self.cutoff) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                self.problem(Problem::Metadata, true);
+                None
+            }
+        }
+    }
+
+    /// Scans or cleans one file or link. Returns true when Clean removed it.
+    fn file(
+        &mut self,
+        directory: &OwnedHandle,
+        child: &Entry,
+        handle: OwnedHandle,
+        tag: &FILE_ATTRIBUTE_TAG_INFO,
+    ) -> bool {
+        let Some(mut bytes) = self.file_bytes(&handle, tag) else {
+            return false;
+        };
+        if !self.clean {
+            self.bytes = self.bytes.saturating_add(bytes);
+            return false;
+        }
+        let handle = if child.directory {
+            handle
+        } else {
+            // The inspection handle denies delete sharing, so release it before
+            // requesting DELETE. Recheck the reopened file: it may have changed.
+            drop(handle);
+            if self.stopping() {
+                return false;
+            }
+            let Ok(Some((handle, tag))) = self.open_child(directory, child, true) else {
+                return false;
+            };
+            let Some(current_bytes) = self.file_bytes(&handle, &tag) else {
+                return false;
+            };
+            bytes = current_bytes;
+            handle
+        };
+        if self.stopping() {
+            return false;
+        }
+        match delete(&handle) {
+            Ok(()) => {
+                self.bytes = self.bytes.saturating_add(bytes);
+                self.deleted_any = true;
+                true
+            }
+            Err(error) => {
+                self.problem(classify(&error), true);
+                false
+            }
+        }
+    }
+}
+
+/// True when `name` is `prefix*suffix` for one of `patterns`, ignoring ASCII case.
+fn matches_any(patterns: &[(&str, &str)], name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    patterns.iter().any(|(prefix, suffix)| {
+        name.len() >= prefix.len() + suffix.len()
+            && name
+                .get(..prefix.len())
+                .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+            && name
+                .get(name.len() - suffix.len()..)
+                .is_some_and(|end| end.eq_ignore_ascii_case(suffix))
+    })
 }
 
 /// Scan one built-in Target at a fixed operation time.
@@ -653,13 +856,13 @@ fn scan_inner(
     stop: &AtomicBool,
     before_open: &mut dyn FnMut(&OsStr),
 ) -> ScanResult {
-    let root = match roots.open(id) {
-        Ok(Some(root)) => root,
-        Ok(None) => return ScanResult::NotPresent,
-        Err(problem) => return ScanResult::Failed { problem },
+    let Some(target) = targets::find(id) else {
+        return ScanResult::Failed {
+            problem: Problem::Other,
+        };
     };
-    let mut walk = Walk::new(false, time, stop, before_open);
-    walk.walk(root.target());
+    let mut walk = Walk::new(false, target, time, stop, before_open);
+    walk.target(target, roots);
     if walk.stopped {
         ScanResult::Stopped
     } else if let Some(problem) = walk.problem {
@@ -671,8 +874,10 @@ fn scan_inner(
         } else {
             ScanResult::Failed { problem }
         }
-    } else {
+    } else if walk.visited {
         ScanResult::Complete { bytes: walk.bytes }
+    } else {
+        ScanResult::NotPresent
     }
 }
 
@@ -688,23 +893,20 @@ fn clean_inner(
     stop: &AtomicBool,
     before_open: &mut dyn FnMut(&OsStr),
 ) -> CleanResult {
-    let untouched = |status, coverage_problem| CleanResult {
-        status,
-        deleted_bytes: 0,
-        skipped: vec![],
-        coverage_problem,
+    let Some(target) = targets::find(id) else {
+        return CleanResult {
+            status: CleanStatus::Failed,
+            deleted_bytes: 0,
+            skipped: vec![],
+            coverage_problem: Some(Problem::Other),
+        };
     };
-    let root = match roots.open(id) {
-        Ok(Some(root)) => root,
-        Ok(None) => return untouched(CleanStatus::Complete, None),
-        Err(problem) => return untouched(CleanStatus::Failed, Some(problem)),
-    };
-    let mut walk = Walk::new(true, time, stop, before_open);
-    walk.walk(root.target());
+    let mut walk = Walk::new(true, target, time, stop, before_open);
+    walk.target(target, roots);
     let status = if walk.stopped {
         CleanStatus::Stopped
     } else if walk.rejected() {
-        if walk.bytes > 0 {
+        if walk.deleted_any {
             CleanStatus::Partial
         } else {
             CleanStatus::Failed
@@ -728,13 +930,26 @@ mod tests {
     use std::os::windows::fs::OpenOptionsExt;
     use windows::Win32::Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_MODE};
 
+    const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+
+    /// Roots with one subfolder of `dir` per known folder.
+    fn fixture_roots(dir: &Path) -> Roots {
+        Roots {
+            local_app_data: Ok(dir.join("Local")),
+            win_dir: Ok(dir.join("Windows")),
+            program_data: Ok(dir.join("ProgramData")),
+        }
+    }
+
+    fn folder(roots: &Roots, base: Base, path: &str) -> PathBuf {
+        roots.base(base).unwrap().join(path)
+    }
+
+    /// Fixture roots, the created User temp folder, and a fixed operation time.
     fn fixture() -> (tempfile::TempDir, Roots, PathBuf, SystemTime) {
         let dir = tempfile::tempdir().unwrap();
-        let roots = Roots {
-            local_app_data: Ok(dir.path().join("Local")),
-            win_dir: Ok(dir.path().join("Windows")),
-        };
-        let target = roots.path("user-temp").unwrap();
+        let roots = fixture_roots(dir.path());
+        let target = folder(&roots, Base::LocalAppData, "Temp");
         fs::create_dir_all(&target).unwrap();
         let time = UNIX_EPOCH + Duration::from_secs(2_000_000_000);
         (dir, roots, target, time)
@@ -764,7 +979,6 @@ mod tests {
             let (dir, _, target, time) = fixture();
             write_at(&target.join("old"), b"old", time - DAY - DAY);
             let roots = Roots::resolve(|id| {
-                assert!(*id == FOLDERID_LocalAppData || *id == FOLDERID_Windows);
                 if *id == failed_folder {
                     Err(io::Error::from_raw_os_error(5))
                 } else {
@@ -915,7 +1129,7 @@ mod tests {
         let mut checked = false;
         let result = scan_inner("user-temp", &roots, time, &stop, &mut |_| {
             if !checked {
-                assert!(fs::rename(roots.local_app_data.as_ref().unwrap(), &moved).is_err());
+                assert!(fs::rename(roots.base(Base::LocalAppData).unwrap(), &moved).is_err());
                 checked = true;
             }
         });
@@ -938,6 +1152,26 @@ mod tests {
         });
         assert_eq!(result.status, CleanStatus::Stopped);
         assert!(target.join("a").exists() ^ target.join("b").exists());
+    }
+
+    #[test]
+    fn recent_file_without_delete_sharing_is_excluded_without_failure() {
+        let (_dir, roots, target, time) = fixture();
+        let file = target.join("working");
+        write_at(&file, b"keep", time);
+        let locked = hold(&file, FILE_SHARE_READ | FILE_SHARE_WRITE);
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            scan("user-temp", &roots, time, &stop),
+            ScanResult::Complete { bytes: 0 }
+        );
+        let result = clean("user-temp", &roots, time, &stop);
+        assert_eq!(result.status, CleanStatus::Complete, "{result:?}");
+        assert_eq!(result.deleted_bytes, 0);
+        assert!(result.skipped.is_empty());
+        assert_eq!(result.coverage_problem, None);
+        assert_eq!(fs::read(&file).unwrap(), b"keep");
+        drop(locked);
     }
 
     #[test]
@@ -1051,7 +1285,7 @@ mod tests {
     #[test]
     fn windows_temp_uses_only_its_own_root() {
         let (_dir, roots, user_temp, time) = fixture();
-        let windows_temp = roots.path("windows-temp").unwrap();
+        let windows_temp = folder(&roots, Base::WinDir, "Temp");
         fs::create_dir_all(&windows_temp).unwrap();
         write_at(&user_temp.join("user"), b"u", time - DAY - DAY);
         write_at(&windows_temp.join("windows"), b"w", time - DAY - DAY);
@@ -1132,18 +1366,234 @@ mod tests {
         assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"safe");
     }
 
+    /// Creates `path` with `bytes`, making its parent folders.
+    fn put(path: &Path, bytes: &[u8]) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn thumbnail_cache_removes_only_matching_immediate_files() {
+        let (_dir, roots, _, time) = fixture();
+        let explorer = folder(&roots, Base::LocalAppData, r"Microsoft\Windows\Explorer");
+        // No Minimum age applies, so a file written just now is eligible.
+        put(&explorer.join("ICONCACHE_48.DB"), b"icon");
+        write_at(&explorer.join("thumbcache_256.db"), b"thumb", time);
+        let kept = [
+            explorer.join("ExplorerStartupLog.etl"),
+            explorer.join("thumbcache_256.db.bak"),
+            explorer.join(r"nested\thumbcache_32.db"),
+        ];
+        for path in &kept {
+            put(path, b"keep");
+        }
+        fs::create_dir(explorer.join("iconcache_dir.db")).unwrap();
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            scan("thumbnail-cache", &roots, time, &stop),
+            ScanResult::Complete { bytes: 9 }
+        );
+        let cleaned = clean("thumbnail-cache", &roots, time, &stop);
+        assert_eq!(cleaned.status, CleanStatus::Complete);
+        assert_eq!(cleaned.deleted_bytes, 9);
+        assert!(!explorer.join("thumbcache_256.db").exists());
+        assert!(!explorer.join("ICONCACHE_48.DB").exists());
+        assert!(kept.iter().all(|path| path.exists()));
+        assert!(explorer.join("iconcache_dir.db").is_dir());
+    }
+
+    #[test]
+    fn browser_profiles_lose_only_their_fixed_cache_contents() {
+        let (_dir, roots, _, time) = fixture();
+        let user_data = folder(&roots, Base::LocalAppData, r"Google\Chrome\User Data");
+        let stop = AtomicBool::new(false);
+        fs::create_dir_all(user_data.join(r"Default\Extensions")).unwrap();
+        assert_eq!(
+            scan("chrome-cache", &roots, time, &stop),
+            ScanResult::NotPresent,
+            "a browser without cache folders is absent"
+        );
+
+        let user_data_files = [
+            "Cookies",
+            "History",
+            r"Sessions\Session_1",
+            "Login Data",
+            "Web Data",
+            "Preferences",
+        ];
+        let mut sentinels = vec![user_data.join("Local State")];
+        for profile in ["Default", "Profile 2", "Guest Profile", "System Profile"] {
+            for file in user_data_files {
+                sentinels.push(user_data.join(profile).join(file));
+            }
+        }
+        for profile in ["Guest Profile", "System Profile"] {
+            sentinels.push(user_data.join(profile).join(r"Cache\Cache_Data\f_1"));
+        }
+        for path in &sentinels {
+            put(path, b"user data");
+        }
+        let caches = [
+            "Cache\\Cache_Data\\f_1",
+            "Code Cache\\js\\index",
+            "GPUCache\\data_0",
+        ];
+        for profile in ["Default", "Profile 2"] {
+            for cache in caches {
+                put(&user_data.join(profile).join(cache), b"cache");
+            }
+        }
+        assert_eq!(
+            scan("chrome-cache", &roots, time, &stop),
+            ScanResult::Complete { bytes: 30 }
+        );
+        let cleaned = clean("chrome-cache", &roots, time, &stop);
+        assert_eq!(cleaned.status, CleanStatus::Complete);
+        assert_eq!(cleaned.deleted_bytes, 30);
+        for profile in ["Default", "Profile 2"] {
+            for cache in ["Cache", "Code Cache", "GPUCache"] {
+                let cache = user_data.join(profile).join(cache);
+                assert!(cache.is_dir());
+                assert_eq!(fs::read_dir(&cache).unwrap().count(), 0);
+            }
+        }
+        for path in &sentinels {
+            assert_eq!(fs::read(path).unwrap(), b"user data", "{}", path.display());
+        }
+    }
+
+    #[test]
+    fn redirected_profile_or_cache_folder_is_skipped_and_reported() {
+        let (dir, roots, _, time) = fixture();
+        let user_data = folder(&roots, Base::LocalAppData, r"Google\Chrome\User Data");
+        let outside = dir.path().join("outside");
+        let sentinel = outside.join(r"Cache\sentinel");
+        put(&sentinel, b"safe");
+        put(&user_data.join(r"Default\Code Cache\js\index"), b"cache");
+        fs::create_dir_all(user_data.join("Profile 3")).unwrap();
+        std::os::windows::fs::symlink_dir(&outside, user_data.join("Profile 1")).unwrap();
+        std::os::windows::fs::symlink_dir(
+            outside.join("Cache"),
+            user_data.join(r"Profile 3\GPUCache"),
+        )
+        .unwrap();
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            scan("chrome-cache", &roots, time, &stop),
+            ScanResult::Partial {
+                bytes: 5,
+                problem: Problem::Redirected
+            }
+        );
+        let cleaned = clean("chrome-cache", &roots, time, &stop);
+        assert_eq!(cleaned.status, CleanStatus::Partial);
+        assert_eq!(cleaned.deleted_bytes, 5);
+        assert_eq!(cleaned.coverage_problem, Some(Problem::Redirected));
+        assert_eq!(fs::read(&sentinel).unwrap(), b"safe");
+    }
+
+    #[test]
+    fn profile_replaced_during_the_walk_cannot_redirect_clean() {
+        let (dir, roots, _, time) = fixture();
+        let user_data = folder(&roots, Base::LocalAppData, r"Google\Chrome\User Data");
+        let profile = user_data.join("Default");
+        put(&profile.join(r"Cache\f_1"), b"cache");
+        let outside = dir.path().join("outside");
+        let sentinel = outside.join(r"Cache\sentinel");
+        put(&sentinel, b"safe");
+        let stop = AtomicBool::new(false);
+        let mut swapped = false;
+        let cleaned = clean_inner("chrome-cache", &roots, time, &stop, &mut |name| {
+            if name == "Default" && !swapped {
+                fs::rename(&profile, dir.path().join("moved")).unwrap();
+                std::os::windows::fs::symlink_dir(&outside, &profile).unwrap();
+                swapped = true;
+            }
+        });
+        assert!(swapped);
+        assert_eq!(cleaned.status, CleanStatus::Failed);
+        assert_eq!(cleaned.coverage_problem, Some(Problem::Redirected));
+        assert_eq!(fs::read(&sentinel).unwrap(), b"safe");
+    }
+
+    #[test]
+    fn multi_folder_target_distinguishes_missing_from_inaccessible_folders() {
+        let (_dir, roots, _, time) = fixture();
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            scan("crash-dumps", &roots, time, &stop),
+            ScanResult::NotPresent
+        );
+        let dumps = folder(&roots, Base::LocalAppData, "CrashDumps");
+        let queue = folder(
+            &roots,
+            Base::ProgramData,
+            r"Microsoft\Windows\WER\ReportQueue",
+        );
+        put(&dumps.join("app.exe.123.dmp"), b"dump");
+        put(&queue.join(r"Report1\Report.wer"), b"report");
+        // The LocalAppData WER folder and ReportArchive are missing, which is normal.
+        assert_eq!(
+            scan("crash-dumps", &roots, time, &stop),
+            ScanResult::Complete { bytes: 10 }
+        );
+
+        let blocked = hold(&queue, FILE_SHARE_MODE(0));
+        assert_eq!(
+            scan("crash-dumps", &roots, time, &stop),
+            ScanResult::Partial {
+                bytes: 4,
+                problem: Problem::SharingViolation
+            }
+        );
+        let cleaned = clean("crash-dumps", &roots, time, &stop);
+        assert_eq!(cleaned.status, CleanStatus::Partial);
+        assert_eq!(cleaned.deleted_bytes, 4);
+        assert_eq!(cleaned.coverage_problem, Some(Problem::SharingViolation));
+        drop(blocked);
+
+        fs::remove_dir(&dumps).unwrap();
+        let blocked = hold(&queue, FILE_SHARE_MODE(0));
+        assert_eq!(
+            scan("crash-dumps", &roots, time, &stop),
+            ScanResult::Failed {
+                problem: Problem::SharingViolation
+            }
+        );
+        drop(blocked);
+        assert_eq!(clean("crash-dumps", &roots, time, &stop).deleted_bytes, 6);
+        assert!(queue.is_dir());
+    }
+
+    #[test]
+    fn clean_that_removed_only_empty_files_is_partial_when_a_folder_is_blocked() {
+        let (_dir, roots, _, time) = fixture();
+        let dumps = folder(&roots, Base::LocalAppData, "CrashDumps");
+        let queue = folder(
+            &roots,
+            Base::ProgramData,
+            r"Microsoft\Windows\WER\ReportQueue",
+        );
+        put(&dumps.join("empty.dmp"), b"");
+        fs::create_dir_all(&queue).unwrap();
+        let blocked = hold(&queue, FILE_SHARE_MODE(0));
+        let stop = AtomicBool::new(false);
+        let cleaned = clean("crash-dumps", &roots, time, &stop);
+        drop(blocked);
+        assert_eq!(cleaned.status, CleanStatus::Partial);
+        assert_eq!(cleaned.deleted_bytes, 0);
+        assert!(!dumps.join("empty.dmp").exists());
+    }
+
     #[test]
     fn abrupt_exit_leaves_a_usable_partial_target() {
-        let (_dir, roots, target, time) = fixture();
+        let (dir, roots, target, time) = fixture();
         write_at(&target.join("a"), b"a", time - DAY - DAY);
         write_at(&target.join("b"), b"b", time - DAY - DAY);
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "core::tests::abrupt_exit_helper", "--nocapture"])
-            .env(
-                "CLEANER_INTERRUPT_LOCAL",
-                roots.local_app_data.as_ref().unwrap(),
-            )
-            .env("CLEANER_INTERRUPT_WINDOWS", roots.win_dir.as_ref().unwrap())
+            .env("CLEANER_INTERRUPT_DIR", dir.path())
             .status()
             .unwrap();
         assert_eq!(child.code(), Some(17));
@@ -1159,15 +1609,10 @@ mod tests {
 
     #[test]
     fn abrupt_exit_helper() {
-        let Some(local) = std::env::var_os("CLEANER_INTERRUPT_LOCAL") else {
+        let Some(dir) = std::env::var_os("CLEANER_INTERRUPT_DIR") else {
             return;
         };
-        let roots = Roots {
-            local_app_data: Ok(PathBuf::from(local)),
-            win_dir: Ok(PathBuf::from(
-                std::env::var_os("CLEANER_INTERRUPT_WINDOWS").unwrap(),
-            )),
-        };
+        let roots = fixture_roots(Path::new(&dir));
         let time = UNIX_EPOCH + Duration::from_secs(2_000_000_000);
         let stop = AtomicBool::new(false);
         let mut seen = 0;

@@ -18,7 +18,7 @@ Each Target has a verified cleanup procedure. Cache files can be needed by runni
 
 1. As Kevin, I want a Scan on launch, with each Target's result shown as it finishes, so that I can review results without waiting for every Target.
 2. As Kevin, I want the total eligible size and the Selection size shown as estimates, so that I can judge whether a Clean is worth it.
-3. As Kevin, I want Targets grouped under Windows, Browsers, Apps, and Developer, with a tick box on each row, so that I control the Selection.
+3. As Kevin, I want Targets grouped under Windows, Browsers, and Developer, with a tick box on each row, so that I control the Selection.
 4. As Kevin, I want to Clean once all selected, present Targets have complete Scan results, so that a slow unticked Target does not block me.
 5. As Kevin, I want the checklist to be the only confirmation before Clean, so that I do not have to dismiss another prompt.
 6. As Kevin, I want each selected row to show queued, cleaning, and final results, so that I can distinguish completed work from skipped or failed work.
@@ -26,7 +26,7 @@ Each Target has a verified cleanup procedure. Cache files can be needed by runni
 8. As Kevin, I want a rescan icon, so that I can refresh results after using other apps.
 9. As Kevin, I want both ticks and unticks saved when I change them, with a visible error if saving fails, so that exclusions are not silently lost.
 10. As Kevin, I want new Targets to use their Default selection while existing choices stay unchanged, so that an update preserves my Selection.
-11. As Kevin, I want developer caches and the DirectX and NVIDIA shader caches unticked by default, so that I choose when to incur downloads or rebuild costs.
+11. As Kevin, I want developer caches and the DirectX shader cache unticked by default, so that I choose when to incur downloads or rebuild costs.
 12. As Kevin, I want absent Targets hidden and failed or incomplete Scans shown clearly, so that missing content is not confused with an access error.
 13. As Kevin, I want rejected deletions skipped and reported by reason, so that Clean does not force access or claim that every failure means a file is in use.
 14. As Kevin, I want other apps left running, so that Clean does not close my work.
@@ -58,7 +58,7 @@ Each Target has a verified cleanup procedure. Cache files can be needed by runni
 
 1. **Core (Targets, Scan, Clean)** owns Target eligibility, path confinement, traversal, deletion, and per-Target results. Its small interface accepts Target IDs, `Roots`, the operation time, a stop signal, and a result callback. Production callers cannot supply deletion paths. Tests supply fixture roots and a fixed time through the same interface.
    - A fixed Target table contains each ID, display name, Category, Default selection, optional Minimum age, and folders or the Recycle Bin operation. A folder uses a base root and a fixed relative path, with a limited filename filter or profile expansion where needed.
-   - `Roots` contains `LocalAppData`, `AppData`, `WinDir`, `ProgramData`, and `UserProfile`, resolved through the appropriate Windows folder APIs. Validate the resolved locations before traversing them.
+   - `Roots` contains `LocalAppData`, `WinDir`, and `ProgramData`, resolved through the appropriate Windows folder APIs. Validate the resolved locations before traversing them.
    - Scan and Clean share eligibility rules. Clean checks those rules again against the current files; a previous Scan never authorizes deletion by itself.
    - Process Targets sequentially on a worker thread. Report each result as it finishes and check the stop signal between filesystem steps. Add bounded concurrency only if measured performance establishes a need.
    - Keep the Recycle Bin wrapper inside the core. The core exposes its different result capabilities honestly. Do not add a plugin system or generic cleanup strategy framework.
@@ -131,7 +131,7 @@ Explain that deleted file sizes may differ from disk space reclaimed. Never disp
 
 These are the proposed v1 locations, not evidence that they are safe to ship. Before implementation readiness, validate each retained Target on a disposable Windows installation: confirm its actual paths and owner/version, record a primary reference or reproducible owner-behavior check, and establish that the defined cleanup tolerates concurrent use, rejected deletes, and interruption. A folder's existence is insufficient. Remove any Target whose cleanup requires a different protocol that v1 does not implement. Do not add guessed paths or ship an unvalidated Target disabled by default.
 
-Only standard local locations are supported. Custom cache directories and browser profiles outside these locations are not discovered through configuration files. Expand Chromium profiles only as immediate `Default` or `Profile <number>` directories, and Firefox profiles only as immediate directories below the listed `Profiles` folder. Apply confinement checks before entering each profile.
+Only standard local locations are supported. Custom cache directories and browser profiles outside these locations are not discovered through configuration files. Expand Chromium profiles only as immediate `Default` or `Profile <number>` directories. Apply confinement checks before entering each profile.
 
 | Category | Target | Folders | Minimum age | Default selection |
 |---|---|---|---|---|
@@ -142,21 +142,12 @@ Only standard local locations are supported. Custom cache directories and browse
 | Windows | Crash dumps and error reports | `LocalAppData\CrashDumps`, `LocalAppData\Microsoft\Windows\WER`, `ProgramData\Microsoft\Windows\WER\ReportArchive`, `ProgramData\Microsoft\Windows\WER\ReportQueue` | - | Ticked |
 | Windows | DirectX shader cache | `LocalAppData\D3DSCache` | - | Unticked |
 | Browsers | Chrome cache | `LocalAppData\Google\Chrome\User Data\<profile>\{Cache, Code Cache, GPUCache}` | - | Ticked |
-| Browsers | Edge cache | Same profile cache layout under `LocalAppData\Microsoft\Edge\User Data` | - | Ticked |
-| Browsers | Brave cache | Same profile cache layout under `LocalAppData\BraveSoftware\Brave-Browser\User Data` | - | Ticked |
-| Browsers | Firefox cache | `LocalAppData\Mozilla\Firefox\Profiles\<profile>\cache2` | - | Ticked |
-| Apps | Discord cache | `AppData\discord\{Cache, Code Cache, GPUCache}` | - | Ticked |
-| Apps | VS Code cache | `AppData\Code\{Cache, CachedData, Code Cache, GPUCache}` | - | Ticked |
-| Apps | NVIDIA shader cache | `LocalAppData\NVIDIA\{DXCache, GLCache}` | - | Unticked |
 | Developer | npm cache | `LocalAppData\npm-cache` | - | Unticked |
 | Developer | pnpm store | `LocalAppData\pnpm\store` | - | Unticked |
-| Developer | Bun cache | `UserProfile\.bun\install\cache` | - | Unticked |
-| Developer | Yarn cache | `LocalAppData\Yarn\Cache` | - | Unticked |
 | Developer | pip cache | `LocalAppData\pip\cache` | - | Unticked |
-| Developer | Cargo registry | `UserProfile\.cargo\registry` | - | Unticked |
 | Developer | Go build cache | `LocalAppData\go-build` | - | Unticked |
 
-Both named shader Targets are unticked. Browser and app cache validation must account for the rebuild effects of the included `GPUCache` directories.
+The DirectX shader Target is unticked. Browser cache validation must account for the rebuild effects of the included `GPUCache` directories.
 
 ### UI
 

@@ -4,18 +4,20 @@ A portable Windows 11 app for reviewing and permanently deleting caches and disc
 
 ## Current scope
 
-The live worker supports User temp and Windows temp only. It scans files last modified more than 24 hours before the operation starts, then rechecks age during Clean. The age rule reduces risk but does not prove that a file is unused. Rejected deletions are skipped and reported. Other proposed Targets remain in the PRD and are not displayed by this build.
+The worker supports the folder Targets in `src/targets.rs`: the two temp folders, thumbnail and icon caches, crash dumps and error reports, the DirectX shader cache, Chrome's cache, and the npm, pnpm, pip, and Go caches. The two temp Targets keep only files last modified more than 24 hours before the operation starts, and Clean rechecks their age. The Minimum age reduces risk but does not prove that a file is unused. Rejected deletions are skipped and reported. The Recycle Bin Target is not built yet.
 
-The app saves explicit ticks and unticks in `%APPDATA%\cc-cleaner-at-home\selection.json`. A malformed or unreadable Selection starts with both Targets unticked. The app shows save errors and rolls back a failed change.
+The app saves explicit ticks and unticks in `%APPDATA%\cc-cleaner-at-home\selection.json`. A malformed or unreadable Selection starts with every Target unticked. The app shows save errors and rolls back a failed change.
 
-Clean is enabled. The core and controller passed disposable-folder checks, but the packaged app has not passed a destructive end-to-end test in an isolated Windows installation or concurrent owner-behavior validation. Kevin explicitly waived those checks as a prerequisite for enabling Clean on 2026-09-27.
+Clean is enabled. The core and controller passed disposable-folder checks, but the packaged app has not passed a destructive end-to-end test in an isolated Windows installation or concurrent owner-behavior validation. Kevin explicitly waived those checks for the temp Targets on 2026-09-27. Issue 03 records the evidence for each other Target, including the Windows Targets that have only Disk Cleanup references and no owner-behavior check.
+
+`scripts/owner-checks` holds the owner-behavior checks used to admit or exclude Targets. They damage scratch caches and a scratch browser profile, never the real ones, and need network access.
 
 ## Build and run
 
-- `cargo run` starts a debug build as the current user. It scans real temp folders. Debug builds do not ask for elevation, so Windows temp can report access errors unless the terminal runs as administrator.
+- `cargo run` starts a debug build as the current user. It scans the real Target folders. Debug builds do not ask for elevation, so Windows temp and crash reports can report access errors unless the terminal runs as administrator.
 - `cargo build --release` builds `target\release\cc-cleaner.exe`, the single file that ships. It requires elevation, so start it with `Start-Process` or from File Explorer. `cargo run --release` fails with OS error 740 unless the terminal runs as administrator.
 - Release builds compile GPUI's shaders with `fxc.exe` from the Windows SDK. Set `GPUI_FXC_PATH` if GPUI cannot find it.
-- `cargo test --lib` runs the core, Selection store, controller, and formatting checks. CI also runs `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`.
+- `cargo test --lib` runs the core, Target table, Selection store, controller, checklist grouping, and formatting checks. CI also runs `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`.
 
 ## Platform notes
 

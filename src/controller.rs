@@ -428,6 +428,11 @@ mod tests {
         controller
     }
 
+    /// Picks only the two temp Targets, so tests can finish a Scan with two reports.
+    fn temps(target: &Target) -> bool {
+        matches!(target.id, "user-temp" | "windows-temp")
+    }
+
     fn cleaned(deleted_bytes: u64) -> CleanResult {
         CleanResult {
             status: CleanStatus::Complete,
@@ -450,7 +455,8 @@ mod tests {
         let Command::Scan { op, targets } = controller.start_scan().unwrap() else {
             unreachable!()
         };
-        assert_eq!(targets, ["windows-temp", "user-temp"]);
+        assert_eq!(targets[..2], ["windows-temp", "user-temp"]);
+        assert_eq!(targets.len(), TARGETS.len());
         controller.apply(
             op,
             Event::Scanned(
@@ -500,7 +506,7 @@ mod tests {
 
     #[test]
     fn unsaved_selection_blocks_clean_and_close_suppresses_rescan() {
-        let mut controller = loaded(|_| true);
+        let mut controller = loaded(temps);
         let scan = scan_op(&mut controller);
         controller.apply(
             scan,
@@ -537,7 +543,7 @@ mod tests {
 
     #[test]
     fn duplicate_requests_do_not_start_another_operation() {
-        let mut controller = loaded(|_| true);
+        let mut controller = loaded(temps);
         let scan = scan_op(&mut controller);
         assert!(controller.start_scan().is_none());
         controller.apply(
@@ -558,7 +564,7 @@ mod tests {
 
     #[test]
     fn close_during_scan_cancels_pending_clean_after_worker_acknowledges_stop() {
-        let mut controller = loaded(|_| true);
+        let mut controller = loaded(temps);
         let scan = scan_op(&mut controller);
         controller.apply(
             scan,
@@ -575,7 +581,7 @@ mod tests {
 
     #[test]
     fn finished_clean_results_follow_worker_order_and_survive_rescan() {
-        let mut controller = loaded(|_| true);
+        let mut controller = loaded(temps);
         let scan = scan_op(&mut controller);
         for id in ["user-temp", "windows-temp"] {
             controller.apply(scan, Event::Scanned(id, ScanResult::Complete { bytes: 1 }));
@@ -606,7 +612,7 @@ mod tests {
 
     #[test]
     fn failed_save_restores_the_last_stored_selection() {
-        let mut controller = loaded(|_| true);
+        let mut controller = loaded(temps);
         assert!(controller.toggle("user-temp").is_some());
         controller.save_finished(Err("disk full".into()));
         assert!(controller.rows()[0].selected);
