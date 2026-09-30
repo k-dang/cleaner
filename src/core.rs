@@ -10,7 +10,7 @@ use std::time::SystemTime;
 use windows::Win32::UI::Shell::{FOLDERID_LocalAppData, FOLDERID_ProgramData, FOLDERID_Windows};
 use windows::core::GUID;
 
-use crate::results::{Event, Problem};
+use crate::results::{Drive, Event, Problem};
 use crate::targets::{self, Base, Content, Target, TargetId};
 
 pub mod recycle_bin;
@@ -115,7 +115,7 @@ pub fn scan_targets(
 /// `Finished`. The Recycle Bin is emptied only on `drives`, captured by its Scan.
 pub fn clean_targets(
     targets: &[TargetId],
-    drives: &[char],
+    drives: &[Drive],
     roots: &Roots,
     shell: &dyn Shell,
     time: SystemTime,

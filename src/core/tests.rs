@@ -18,7 +18,7 @@ use windows::Win32::UI::Shell::{FOLDERID_LocalAppData, FOLDERID_Windows};
 use crate::results::{CleanResult, CleanStatus, Event, Problem, ScanResult};
 use crate::targets::{Base, Content, Folders, TargetId};
 
-use super::recycle_bin::tests::{FakeShell, bin};
+use super::recycle_bin::tests::{FakeShell, bin, drive};
 use super::win::{classify, os_error, win32_code};
 use super::*;
 
@@ -809,14 +809,14 @@ fn mixed_scan_and_clean_report_each_target_in_order() {
             Event::RecycleBinScanned(
                 "recycle-bin",
                 ScanResult::Complete { bytes: 300 },
-                vec!['C', 'D']
+                vec![drive('C'), drive('D')]
             ),
             Event::Scanned("user-temp", ScanResult::Complete { bytes: 3 }),
             Event::Finished,
         ]
     );
     events.clear();
-    clean_targets(&ids, &['C'], &roots, &shell, time, &stop, &mut |e| {
+    clean_targets(&ids, &[drive('C')], &roots, &shell, time, &stop, &mut |e| {
         events.push(e)
     });
     let emptied = CleanResult {

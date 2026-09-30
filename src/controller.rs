@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 
-use crate::results::{CleanResult, Event, ScanResult};
+use crate::results::{CleanResult, Drive, Event, ScanResult};
 use crate::selection::{self, Choices, Loaded};
 use crate::targets::{TARGETS, Target, TargetId};
 
@@ -24,7 +24,7 @@ pub enum Command {
         op: OpId,
         targets: Vec<TargetId>,
         /// The drives whose Recycle Bins the latest Scan covered.
-        drives: Vec<char>,
+        drives: Vec<Drive>,
     },
     /// Ask the worker running `op` to stop between filesystem steps or shell calls.
     Stop(OpId),
@@ -81,7 +81,7 @@ pub struct Controller {
     /// Targets captured by a Clean request that waits for the Scan worker to stop.
     pending_clean: Option<Vec<TargetId>>,
     /// The drives whose Recycle Bins the current or latest Scan covered.
-    recycle_bin_drives: Vec<char>,
+    recycle_bin_drives: Vec<Drive>,
     /// Results reported so far by the running Clean.
     clean_results: Vec<CleanResult>,
     last_clean: Option<Vec<CleanResult>>,
@@ -455,6 +455,13 @@ mod tests {
         }
     }
 
+    fn drive(letter: char) -> Drive {
+        Drive {
+            letter,
+            volume: format!("volume {letter}"),
+        }
+    }
+
     fn scan_op(controller: &mut Controller) -> OpId {
         match controller.start_scan().unwrap() {
             Command::Scan { op, .. } => op,
@@ -525,7 +532,11 @@ mod tests {
         let empty_bin = ScanResult::Complete { bytes: 0 };
         controller.apply(
             scan,
-            Event::RecycleBinScanned("recycle-bin", empty_bin.clone(), vec!['C', 'D']),
+            Event::RecycleBinScanned(
+                "recycle-bin",
+                empty_bin.clone(),
+                vec![drive('C'), drive('D')],
+            ),
         );
         assert_eq!(controller.request_clean(), Some(Command::Stop(scan)));
         let Some(Command::Clean {
@@ -536,20 +547,23 @@ mod tests {
         else {
             panic!("expected Clean")
         };
-        assert_eq!((targets, drives), (vec!["recycle-bin"], vec!['C', 'D']));
+        assert_eq!(
+            (targets, drives),
+            (vec!["recycle-bin"], vec![drive('C'), drive('D')])
+        );
         controller.apply(op, Event::Cleaned("recycle-bin", cleaned(0)));
         let Some(Command::Scan { op: rescan, .. }) = controller.apply(op, Event::Finished) else {
             panic!("expected rescan")
         };
         controller.apply(
             rescan,
-            Event::RecycleBinScanned("recycle-bin", empty_bin, vec!['C']),
+            Event::RecycleBinScanned("recycle-bin", empty_bin, vec![drive('C')]),
         );
         controller.apply(rescan, Event::Finished);
         let Some(Command::Clean { drives, .. }) = controller.request_clean() else {
             panic!("expected Clean")
         };
-        assert_eq!(drives, ['C']);
+        assert_eq!(drives, [drive('C')]);
     }
 
     #[test]

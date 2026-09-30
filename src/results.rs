@@ -10,6 +10,8 @@ pub enum Problem {
     Redirected,
     Metadata,
     NonLocal,
+    /// The drive letter mounts a different volume than the Scan found.
+    DriveChanged,
     Other,
 }
 
@@ -21,6 +23,7 @@ impl Problem {
             Problem::Redirected => "redirected folder skipped",
             Problem::Metadata => "metadata unavailable",
             Problem::NonLocal => "network location skipped",
+            Problem::DriveChanged => "drive changed since Scan",
             Problem::Other => "I/O error",
         }
     }
@@ -75,12 +78,20 @@ pub struct CleanResult {
     pub coverage_problem: Option<Problem>,
 }
 
+/// A drive whose Recycle Bin a Scan covered: its letter and the volume mounted
+/// there, as a volume GUID path such as `\\?\Volume{...}\`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Drive {
+    pub letter: char,
+    pub volume: String,
+}
+
 /// A worker's report about the operation it is running, in the order it happens.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Event {
     Scanned(TargetId, ScanResult),
     /// The Recycle Bin's Scan, with the drives it covered. A Clean empties only these.
-    RecycleBinScanned(TargetId, ScanResult, Vec<char>),
+    RecycleBinScanned(TargetId, ScanResult, Vec<Drive>),
     Cleaning(TargetId),
     Cleaned(TargetId, CleanResult),
     /// The worker has stopped touching the filesystem for this operation.
