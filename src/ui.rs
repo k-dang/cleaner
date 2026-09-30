@@ -28,10 +28,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowPos, WINDOW_EX_STYLE, WINDOW_STYLE,
 };
 
-use crate::controller::{CleanProgress, Command, Controller, Event, OpId, Row};
+use crate::controller::{CleanProgress, Command, Controller, OpId, Row};
+use crate::core::recycle_bin::SystemShell;
 use crate::core::{self, Roots};
 use crate::format;
-use crate::results::{CleanStatus, ScanResult};
+use crate::results::{CleanStatus, Event, ScanResult};
 use crate::selection::{self, Choices, SelectionStore};
 use crate::targets::{Category, TargetId};
 use crate::theme::{self, System, Theme};
@@ -265,40 +266,43 @@ impl CleanerView {
                     worker.stop.store(true, Ordering::Release);
                 }
             }
-            Some(Command::Scan { op, targets }) => self.start_worker(op, targets, false, cx),
-            Some(Command::Clean { op, targets }) => self.start_worker(op, targets, true, cx),
+            Some(Command::Scan { op, targets }) => {
+                self.start_worker(op, cx, move |roots, time, stop, report| {
+                    core::scan_targets(&targets, roots, &SystemShell, time, stop, report)
+                });
+            }
+            Some(Command::Clean {
+                op,
+                targets,
+                drives,
+            }) => {
+                self.start_worker(op, cx, move |roots, time, stop, report| {
+                    core::clean_targets(&targets, &drives, roots, &SystemShell, time, stop, report)
+                });
+            }
         }
     }
 
-    /// Runs Targets sequentially on a filesystem worker thread.
+    /// Runs `work` on a filesystem worker thread with the system roots and the
+    /// operation time, applying each Event it reports.
     fn start_worker(
         &mut self,
         op: OpId,
-        targets: Vec<TargetId>,
-        clean: bool,
         cx: &mut Context<Self>,
+        work: impl FnOnce(&Roots, SystemTime, &AtomicBool, &mut dyn FnMut(Event)) + Send + 'static,
     ) {
         let stop = Arc::new(AtomicBool::new(false));
         let task_stop = stop.clone();
         let (tx, mut updates) = futures::channel::mpsc::unbounded();
         std::thread::spawn(move || {
-            let roots = Roots::system();
-            let time = SystemTime::now();
-            for id in targets {
-                if task_stop.load(Ordering::Acquire) {
-                    break;
-                }
-                let event = if clean {
-                    tx.unbounded_send(Event::Cleaning(id)).ok();
-                    let result = core::clean(id, &roots, time, &task_stop);
-                    Event::Cleaned(id, result)
-                } else {
-                    let result = core::scan(id, &roots, time, &task_stop);
-                    Event::Scanned(id, result)
-                };
-                tx.unbounded_send(event).ok();
-            }
-            tx.unbounded_send(Event::Finished).ok();
+            work(
+                &Roots::system(),
+                SystemTime::now(),
+                &task_stop,
+                &mut |event| {
+                    tx.unbounded_send(event).ok();
+                },
+            );
         });
         cx.spawn(async move |this, cx| {
             while let Some(event) = updates.next().await {
@@ -1018,7 +1022,9 @@ fn row_status(row: &Row, scanning: bool, t: &Theme) -> RowStatus {
             s.value_color = t.text;
         }
         (Some(CleanProgress::Done(result)), _) => {
-            let deleted = format!("Deleted {}", format::size(result.deleted_bytes));
+            let deleted = result
+                .deleted_bytes
+                .map(|bytes| format!("Deleted {}", format::size(bytes)));
             let mut notes: Vec<String> = result
                 .skipped
                 .iter()
@@ -1036,14 +1042,17 @@ fn row_status(row: &Row, scanning: bool, t: &Theme) -> RowStatus {
                     _ => format!("Incomplete: {}", problem.text()),
                 });
             }
+            if deleted.is_none() && result.status != CleanStatus::Failed {
+                notes.push("Size unavailable".into());
+            }
             match result.status {
                 CleanStatus::Complete => {
                     s.icon = Some((ICON_CHECK, t.success));
-                    s.value = deleted;
+                    s.value = deleted.unwrap_or_else(|| "Emptied".into());
                 }
                 CleanStatus::Partial => {
                     s.icon = Some((ICON_WARNING, t.caution));
-                    s.value = deleted;
+                    s.value = deleted.unwrap_or_else(|| "Partly emptied".into());
                 }
                 CleanStatus::Failed => {
                     s.icon = Some((ICON_ERROR, t.critical));
@@ -1051,7 +1060,9 @@ fn row_status(row: &Row, scanning: bool, t: &Theme) -> RowStatus {
                 }
                 CleanStatus::Stopped => {
                     s.value = "Stopped".into();
-                    notes.push(format!("{deleted} before stopping"));
+                    if let Some(deleted) = deleted {
+                        notes.push(format!("{deleted} before stopping"));
+                    }
                 }
             }
             s.detail = (!notes.is_empty()).then(|| notes.join(" · "));
@@ -1160,6 +1171,7 @@ mod tests {
             [
                 "user-temp",
                 "windows-temp",
+                "recycle-bin",
                 "thumbnail-cache",
                 "crash-dumps"
             ]

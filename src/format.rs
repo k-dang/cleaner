@@ -25,12 +25,16 @@ pub fn size(bytes: u64) -> String {
 /// The one-line summary of a finished Clean, e.g.
 /// `Deleted 1.2 GB of files · 4 files skipped (sharing violation)`.
 pub fn clean_summary(results: &[CleanResult]) -> String {
-    let mut deleted = 0;
+    let mut deleted = None;
+    let mut emptied = false;
     let mut skipped: Vec<(Problem, u64)> = Vec::new();
     let mut incomplete: Vec<(Problem, u64)> = Vec::new();
     let mut stopped = 0;
     for result in results {
-        deleted += result.deleted_bytes;
+        match result.deleted_bytes {
+            Some(bytes) => *deleted.get_or_insert(0) += bytes,
+            None => emptied |= result.status == CleanStatus::Complete,
+        }
         for &(problem, count) in &result.skipped {
             add_count(&mut skipped, problem, count);
         }
@@ -42,8 +46,11 @@ pub fn clean_summary(results: &[CleanResult]) -> String {
     }
 
     let mut parts = Vec::new();
-    if !results.is_empty() {
+    if let Some(deleted) = deleted {
         parts.push(format!("Deleted {} of files", size(deleted)));
+    }
+    if emptied {
+        parts.push("Recycle Bin emptied (size unavailable)".into());
     }
     for (problem, count) in skipped {
         parts.push(format!(
@@ -82,13 +89,44 @@ mod tests {
     fn summary_reports_known_deletions_and_rejected_files() {
         let result = CleanResult {
             status: CleanStatus::Partial,
-            deleted_bytes: 1229 * 1024 * 1024,
+            deleted_bytes: Some(1229 * 1024 * 1024),
             skipped: vec![(Problem::SharingViolation, 4)],
             coverage_problem: None,
         };
         assert_eq!(
             clean_summary(&[result]),
             "Deleted 1.2 GB of files · 4 files skipped (sharing violation)"
+        );
+    }
+
+    #[test]
+    fn recycle_bin_outcome_is_reported_without_a_size() {
+        let files = CleanResult {
+            status: CleanStatus::Complete,
+            deleted_bytes: Some(1229 * 1024 * 1024),
+            skipped: vec![],
+            coverage_problem: None,
+        };
+        let emptied = CleanResult {
+            deleted_bytes: None,
+            ..files.clone()
+        };
+        assert_eq!(
+            clean_summary(&[files.clone(), emptied.clone()]),
+            "Deleted 1.2 GB of files · Recycle Bin emptied (size unavailable)"
+        );
+        assert_eq!(
+            clean_summary(std::slice::from_ref(&emptied)),
+            "Recycle Bin emptied (size unavailable)"
+        );
+        let failed = CleanResult {
+            status: CleanStatus::Partial,
+            coverage_problem: Some(Problem::AccessDenied),
+            ..emptied
+        };
+        assert_eq!(
+            clean_summary(&[files, failed]),
+            "Deleted 1.2 GB of files · 1 Target incomplete (access denied)"
         );
     }
 

@@ -1,5 +1,5 @@
 //! The fixed table of built-in Targets, in checklist order. The core resolves
-//! each Target's folders against `Roots`; nothing outside this table can add a path.
+//! each folder Target against `Roots`; nothing outside this table can add a path.
 
 use std::time::Duration;
 
@@ -69,6 +69,19 @@ pub enum Folders {
     },
 }
 
+/// What a Target cleans.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Content {
+    Folders {
+        folders: Folders,
+        /// Files modified more recently than this before the operation starts are kept.
+        min_age: Option<Duration>,
+    },
+    /// The current account's Recycle Bin on each mounted local fixed drive,
+    /// queried and emptied only through the Windows shell.
+    RecycleBin,
+}
+
 /// A built-in cleanup choice, shown as one checklist row.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Target {
@@ -76,9 +89,7 @@ pub struct Target {
     pub name: &'static str,
     pub category: Category,
     pub default_selected: bool,
-    /// Files modified more recently than this before the operation starts are kept.
-    pub min_age: Option<Duration>,
-    pub folders: Folders,
+    pub content: Content,
 }
 
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
@@ -88,36 +99,50 @@ pub fn find(id: &str) -> Option<&'static Target> {
     TARGETS.iter().find(|target| target.id == id)
 }
 
-// Admission evidence for each Target is recorded in
-// `.scratch/cleaner-v1/issues/03-add-folder-based-targets.md`.
-pub static TARGETS: [Target; 9] = [
+// Admission evidence for each folder Target is recorded in
+// `.scratch/cleaner-v1/issues/03-add-folder-based-targets.md`, and for the
+// Recycle Bin in `.scratch/cleaner-v1/issues/04-add-recycle-bin-cleanup.md`.
+pub static TARGETS: [Target; 10] = [
     Target {
         id: "user-temp",
         name: "User temp",
         category: Category::Windows,
         default_selected: true,
-        min_age: Some(DAY),
-        folders: Folders::Trees(&[(Base::LocalAppData, "Temp")]),
+        content: Content::Folders {
+            folders: Folders::Trees(&[(Base::LocalAppData, "Temp")]),
+            min_age: Some(DAY),
+        },
     },
     Target {
         id: "windows-temp",
         name: "Windows temp",
         category: Category::Windows,
         default_selected: true,
-        min_age: Some(DAY),
-        folders: Folders::Trees(&[(Base::WinDir, "Temp")]),
+        content: Content::Folders {
+            folders: Folders::Trees(&[(Base::WinDir, "Temp")]),
+            min_age: Some(DAY),
+        },
+    },
+    Target {
+        id: "recycle-bin",
+        name: "Recycle Bin",
+        category: Category::Windows,
+        default_selected: true,
+        content: Content::RecycleBin,
     },
     Target {
         id: "thumbnail-cache",
         name: "Thumbnail cache",
         category: Category::Windows,
         default_selected: true,
-        min_age: None,
-        folders: Folders::Files {
-            base: Base::LocalAppData,
-            path: r"Microsoft\Windows\Explorer",
-            prefix: "thumbcache_",
-            suffix: ".db",
+        content: Content::Folders {
+            folders: Folders::Files {
+                base: Base::LocalAppData,
+                path: r"Microsoft\Windows\Explorer",
+                prefix: "thumbcache_",
+                suffix: ".db",
+            },
+            min_age: None,
         },
     },
     Target {
@@ -125,32 +150,38 @@ pub static TARGETS: [Target; 9] = [
         name: "Crash dumps and error reports",
         category: Category::Windows,
         default_selected: true,
-        min_age: None,
-        folders: Folders::Trees(&[
-            (Base::LocalAppData, "CrashDumps"),
-            (Base::LocalAppData, r"Microsoft\Windows\WER"),
-            (Base::ProgramData, r"Microsoft\Windows\WER\ReportArchive"),
-            (Base::ProgramData, r"Microsoft\Windows\WER\ReportQueue"),
-        ]),
+        content: Content::Folders {
+            folders: Folders::Trees(&[
+                (Base::LocalAppData, "CrashDumps"),
+                (Base::LocalAppData, r"Microsoft\Windows\WER"),
+                (Base::ProgramData, r"Microsoft\Windows\WER\ReportArchive"),
+                (Base::ProgramData, r"Microsoft\Windows\WER\ReportQueue"),
+            ]),
+            min_age: None,
+        },
     },
     Target {
         id: "directx-shader-cache",
         name: "DirectX shader cache",
         category: Category::Windows,
         default_selected: false,
-        min_age: None,
-        folders: Folders::Trees(&[(Base::LocalAppData, "D3DSCache")]),
+        content: Content::Folders {
+            folders: Folders::Trees(&[(Base::LocalAppData, "D3DSCache")]),
+            min_age: None,
+        },
     },
     Target {
         id: "chrome-cache",
         name: "Chrome cache",
         category: Category::Browsers,
         default_selected: true,
-        min_age: None,
-        folders: Folders::Profiles {
-            base: Base::LocalAppData,
-            path: r"Google\Chrome\User Data",
-            caches: &["Cache", "Code Cache", "GPUCache"],
+        content: Content::Folders {
+            folders: Folders::Profiles {
+                base: Base::LocalAppData,
+                path: r"Google\Chrome\User Data",
+                caches: &["Cache", "Code Cache", "GPUCache"],
+            },
+            min_age: None,
         },
     },
     Target {
@@ -158,24 +189,30 @@ pub static TARGETS: [Target; 9] = [
         name: "pnpm store",
         category: Category::Developer,
         default_selected: false,
-        min_age: None,
-        folders: Folders::Trees(&[(Base::LocalAppData, r"pnpm\store")]),
+        content: Content::Folders {
+            folders: Folders::Trees(&[(Base::LocalAppData, r"pnpm\store")]),
+            min_age: None,
+        },
     },
     Target {
         id: "pip-cache",
         name: "pip cache",
         category: Category::Developer,
         default_selected: false,
-        min_age: None,
-        folders: Folders::Trees(&[(Base::LocalAppData, r"pip\cache")]),
+        content: Content::Folders {
+            folders: Folders::Trees(&[(Base::LocalAppData, r"pip\cache")]),
+            min_age: None,
+        },
     },
     Target {
         id: "go-build-cache",
         name: "Go build cache",
         category: Category::Developer,
         default_selected: false,
-        min_age: None,
-        folders: Folders::Trees(&[(Base::LocalAppData, "go-build")]),
+        content: Content::Folders {
+            folders: Folders::Trees(&[(Base::LocalAppData, "go-build")]),
+            min_age: None,
+        },
     },
 ];
 

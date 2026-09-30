@@ -1,5 +1,7 @@
 //! Per-Target Scan and Clean results, as reported by a worker.
 
+use crate::targets::TargetId;
+
 /// Why content could not be inspected or cleaned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Problem {
@@ -64,10 +66,23 @@ pub fn add_count(counts: &mut Vec<(Problem, u64)>, problem: Problem, count: u64)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CleanResult {
     pub status: CleanStatus,
-    /// Known logical bytes accepted for deletion.
-    pub deleted_bytes: u64,
+    /// Known logical bytes accepted for deletion. `None` when the cleanup
+    /// procedure reports no per-file results, as the Recycle Bin's shell call does.
+    pub deleted_bytes: Option<u64>,
     /// Known counts of files skipped, by reason.
     pub skipped: Vec<(Problem, u64)>,
     /// A folder or subtree that could not be covered.
     pub coverage_problem: Option<Problem>,
+}
+
+/// A worker's report about the operation it is running, in the order it happens.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Event {
+    Scanned(TargetId, ScanResult),
+    /// The Recycle Bin's Scan, with the drives it covered. A Clean empties only these.
+    RecycleBinScanned(TargetId, ScanResult, Vec<char>),
+    Cleaning(TargetId),
+    Cleaned(TargetId, CleanResult),
+    /// The worker has stopped touching the filesystem for this operation.
+    Finished,
 }
