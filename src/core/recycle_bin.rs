@@ -145,8 +145,10 @@ pub fn clean(shell: &dyn Shell, drives: &[Drive], stop: &AtomicBool) -> CleanRes
         if stopped {
             break;
         }
+        let bin = shell.query(drive.letter);
         // The shell names a bin only by drive letter, so a letter remounted since
         // the Scan is skipped rather than emptying a bin the Scan never covered.
+        // Checking after the query leaves only a stop check before the empty call.
         match shell.volume(drive.letter) {
             Ok(volume) if volume == drive.volume => {}
             Ok(_) => {
@@ -158,7 +160,7 @@ pub fn clean(shell: &dyn Shell, drives: &[Drive], stop: &AtomicBool) -> CleanRes
                 continue;
             }
         }
-        match shell.query(drive.letter) {
+        match bin {
             Err(error) => {
                 problem.get_or_insert(classify(&error));
                 continue;
@@ -213,6 +215,8 @@ pub(crate) mod tests {
         pub calls: Mutex<Vec<(&'static str, char)>>,
         /// Set while an `empty` call is in progress, as closing the window would.
         pub stop_during_empty: Option<Arc<AtomicBool>>,
+        /// Mounts another volume at this letter while its bin is queried.
+        pub remount_during_query: Option<char>,
     }
 
     impl FakeShell {
@@ -239,6 +243,9 @@ pub(crate) mod tests {
 
         fn query(&self, drive: char) -> io::Result<Bin> {
             self.calls.lock().unwrap().push(("query", drive));
+            if self.remount_during_query == Some(drive) {
+                self.volumes.lock().unwrap().insert(drive, volume_of('X'));
+            }
             self.bins.lock().unwrap()[&drive].map_err(io::Error::from_raw_os_error)
         }
 
@@ -349,11 +356,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn clean_skips_a_drive_letter_that_now_mounts_another_volume() {
+    fn clean_does_not_empty_a_drive_letter_remounted_since_the_scan() {
         let stop = AtomicBool::new(false);
-        let shell = FakeShell::new(&[('C', bin(300, 2)), ('D', bin(7, 1))]);
+        let mut shell = FakeShell::new(&[('C', bin(300, 2)), ('D', bin(7, 1))]);
         let (_, drives) = scan(&shell, &stop);
-        shell.volumes.lock().unwrap().insert('D', volume_of('X'));
+        shell.remount_during_query = Some('D');
         shell.calls.lock().unwrap().clear();
         let result = clean(&shell, &drives, &stop);
         assert_eq!(
@@ -362,7 +369,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             *shell.calls.lock().unwrap(),
-            [("query", 'C'), ("empty", 'C')]
+            [("query", 'C'), ("empty", 'C'), ("query", 'D')]
         );
     }
 
