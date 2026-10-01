@@ -89,6 +89,7 @@ pub struct Drive {
 /// A worker's report about the operation it is running, in the order it happens.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Event {
+    Scanning(TargetId),
     Scanned(TargetId, ScanResult),
     /// The Recycle Bin's Scan, with the drives it covered. A Clean empties only these.
     RecycleBinScanned(TargetId, ScanResult, Vec<Drive>),

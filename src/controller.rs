@@ -44,6 +44,9 @@ pub struct Row {
     pub selected: bool,
     /// This Target's result from the current or latest Scan; `None` until it reports.
     pub scan: Option<ScanResult>,
+    /// The previous Scan's result, shown until the current Scan reports this
+    /// Target. It never counts toward totals or Clean readiness.
+    pub previous: Option<ScanResult>,
     pub clean: Option<CleanProgress>,
 }
 
@@ -82,6 +85,8 @@ pub struct Controller {
     pending_clean: Option<Vec<TargetId>>,
     /// The drives whose Recycle Bins the current or latest Scan covered.
     recycle_bin_drives: Vec<Drive>,
+    /// The Target the running Scan is inspecting.
+    scanning_target: Option<TargetId>,
     /// Results reported so far by the running Clean.
     clean_results: Vec<CleanResult>,
     last_clean: Option<Vec<CleanResult>>,
@@ -103,6 +108,7 @@ impl Controller {
                 target,
                 selected: false,
                 scan: None,
+                previous: None,
                 clean: None,
             })
             .collect();
@@ -112,6 +118,7 @@ impl Controller {
             next_op: 0,
             pending_clean: None,
             recycle_bin_drives: Vec::new(),
+            scanning_target: None,
             clean_results: Vec::new(),
             last_clean: None,
             selection_loaded: false,
@@ -136,7 +143,12 @@ impl Controller {
         self.operation = Operation::Scanning(op);
         self.recycle_bin_drives.clear();
         for row in &mut self.rows {
-            row.scan = None;
+            let estimate = row.scan.take();
+            // A cleaned Target's estimate no longer describes its contents.
+            row.previous = match row.clean {
+                Some(CleanProgress::Done(_)) => None,
+                _ => estimate,
+            };
         }
         let (selected, rest): (Vec<&Row>, Vec<&Row>) =
             self.rows.iter().partition(|row| row.selected);
@@ -176,9 +188,18 @@ impl Controller {
         totals
     }
 
+    /// The Target the running Scan is inspecting, if any.
+    pub fn scanning_target(&self) -> Option<TargetId> {
+        self.scanning_target
+    }
+
     /// Applies a worker report. Reports from any operation but the current one are ignored.
     pub fn apply(&mut self, op: OpId, event: Event) -> Option<Command> {
         match (self.operation, event) {
+            (Operation::Scanning(current), Event::Scanning(id)) if current == op => {
+                self.scanning_target = Some(id);
+                None
+            }
             (Operation::Scanning(current), Event::Scanned(id, result)) if current == op => {
                 self.set_scan(id, result);
                 None
@@ -193,7 +214,9 @@ impl Controller {
             (Operation::Scanning(current), Event::Finished) if current == op => {
                 for row in &mut self.rows {
                     row.scan.get_or_insert(ScanResult::Stopped);
+                    row.previous = None;
                 }
+                self.scanning_target = None;
                 self.operation = Operation::Idle;
                 self.pending_clean
                     .take()
@@ -407,8 +430,10 @@ impl Controller {
     }
 
     fn set_scan(&mut self, id: TargetId, result: ScanResult) {
+        self.scanning_target = None;
         let row = self.row_mut(id);
         row.scan = Some(result);
+        row.previous = None;
         row.clean = None;
     }
 
@@ -564,6 +589,57 @@ mod tests {
             panic!("expected Clean")
         };
         assert_eq!(drives, [drive('C')]);
+    }
+
+    #[test]
+    fn rescan_shows_previous_estimates_until_each_target_reports() {
+        let mut controller = loaded(|target| target.id == "user-temp");
+        let scan = scan_op(&mut controller);
+        controller.apply(
+            scan,
+            Event::Scanned("user-temp", ScanResult::Complete { bytes: 4 }),
+        );
+        controller.apply(
+            scan,
+            Event::Scanned("windows-temp", ScanResult::Complete { bytes: 9 }),
+        );
+        controller.apply(scan, Event::Finished);
+        let Some(Command::Clean { op, .. }) = controller.request_clean() else {
+            panic!("expected Clean")
+        };
+        controller.apply(op, Event::Cleaned("user-temp", cleaned(4)));
+        let Some(Command::Scan { op: rescan, .. }) = controller.apply(op, Event::Finished) else {
+            panic!("expected rescan")
+        };
+        let row = |controller: &Controller, id| {
+            let row = controller.rows().iter().find(|row| row.target.id == id);
+            let row = row.unwrap();
+            (row.scan.clone(), row.previous.clone())
+        };
+        // A cleaned Target's old estimate is obsolete; others stay shown but unused.
+        assert_eq!(row(&controller, "user-temp"), (None, None));
+        let nine = Some(ScanResult::Complete { bytes: 9 });
+        assert_eq!(row(&controller, "windows-temp"), (None, nine.clone()));
+        assert_eq!(controller.totals().complete_bytes, 0);
+
+        controller.apply(rescan, Event::Scanning("user-temp"));
+        assert_eq!(controller.scanning_target(), Some("user-temp"));
+        controller.apply(
+            rescan,
+            Event::Scanned("user-temp", ScanResult::Complete { bytes: 0 }),
+        );
+        assert_eq!(controller.scanning_target(), None);
+        assert!(
+            controller.can_clean(),
+            "only current results decide readiness"
+        );
+        assert_eq!(row(&controller, "windows-temp"), (None, nine));
+        controller.apply(
+            rescan,
+            Event::Scanned("windows-temp", ScanResult::Complete { bytes: 2 }),
+        );
+        let two = Some(ScanResult::Complete { bytes: 2 });
+        assert_eq!(row(&controller, "windows-temp"), (two, None));
     }
 
     #[test]

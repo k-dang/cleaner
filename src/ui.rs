@@ -6,15 +6,16 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use futures::StreamExt;
 use gpui::{
-    AccessibleAction, AnyElement, ClickEvent, Context, Div, FocusHandle, FontWeight, Hsla,
-    InteractiveElement, IntoElement, KeyboardButton, KeyboardClickEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Render, Role, ScrollHandle, Size,
-    Stateful, StatefulInteractiveElement, Styled, Subscription, Toggled, Window, accesskit,
-    actions, div, point, prelude::FluentBuilder, px, rems, size,
+    AccessibleAction, Animation, AnimationExt, AnyElement, ClickEvent, Context, Div, ElementId,
+    FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement, KeyboardButton,
+    KeyboardClickEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Render,
+    Role, ScrollHandle, Size, Stateful, StatefulInteractiveElement, Styled, Subscription, Toggled,
+    Window, accesskit, actions, div, point, prelude::FluentBuilder, pulsating_between, px, rems,
+    size,
 };
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -34,7 +35,7 @@ use crate::core::{self, Roots};
 use crate::format;
 use crate::results::{CleanStatus, Event, ScanResult};
 use crate::selection::{self, Choices, SelectionStore};
-use crate::targets::{Category, TargetId};
+use crate::targets::{self, Category, TargetId};
 use crate::theme::{self, System, Theme};
 
 actions!(cleaner, [FocusNext, FocusPrev]);
@@ -402,7 +403,10 @@ impl CleanerView {
             .count();
         let selected = visible_selection_count(rows);
         let overview = if totals.scanning {
-            format!("{} found so far", format::size(totals.complete_bytes))
+            match self.controller.scanning_target().and_then(targets::find) {
+                Some(target) => format!("Scanning {}…", target.name),
+                None => "Scanning…".to_string(),
+            }
         } else if found == 0 && totals.incomplete == 0 {
             "No eligible files found".to_string()
         } else if found == 0 {
@@ -416,7 +420,7 @@ impl CleanerView {
         };
         let scan_note = if totals.scanning {
             let scanned = rows.iter().filter(|r| r.scan.is_some()).count();
-            format!("Scanning… {scanned} of {} Targets scanned", rows.len())
+            format!("{scanned} of {} scanned", rows.len())
         } else if totals.incomplete > 0 {
             format!(
                 "Excludes {} with incomplete results",
@@ -429,14 +433,9 @@ impl CleanerView {
             "{} selected · {scan_note}",
             format::plural(selected as u64, "Target")
         );
-        let selected_estimate = if totals.scanning
-            && totals.selected_bytes == 0
-            && rows.iter().any(|row| row.selected && row.scan.is_none())
-        {
-            "—".to_string()
-        } else {
-            format::size(totals.selected_bytes)
-        };
+        let estimate = selected_estimate(rows, totals.scanning);
+        let pending = estimate.pending;
+        let selected_estimate = estimate.bytes.map(format::size);
         let idle = self.controller.can_scan();
         let scrolled = self.list.offset().y < px(0.);
 
@@ -460,7 +459,8 @@ impl CleanerView {
                     .role(Role::Label)
                     // Labels take their accessible name from their value.
                     .aria_value(format!(
-                        "Selected estimate: {selected_estimate}. {overview}. {note}"
+                        "Selected estimate: {}. {overview}. {note}",
+                        selected_estimate.as_deref().unwrap_or("calculating")
                     ))
                     .flex()
                     .flex_col()
@@ -480,13 +480,28 @@ impl CleanerView {
                             .items_baseline()
                             .gap(rems(0.71))
                             .font_family(DISPLAY_FONT)
-                            .child(
-                                div()
+                            .child({
+                                let number = div()
                                     .text_size(rems(2.86))
                                     .line_height(rems(3.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(selected_estimate),
-                            )
+                                    .font_weight(FontWeight::SEMIBOLD);
+                                match selected_estimate {
+                                    Some(estimate) => number
+                                        .when(pending, |d| d.text_color(t.text_secondary))
+                                        .child(estimate)
+                                        .into_any_element(),
+                                    // Nothing is known yet. Hidden text sizes the placeholder
+                                    // like a number, so nothing moves when one arrives.
+                                    None => self.pulsing(
+                                        "estimate-placeholder",
+                                        number
+                                            .rounded(px(4.))
+                                            .bg(t.divider)
+                                            .text_color(gpui::transparent_black())
+                                            .child("00 GB"),
+                                    ),
+                                }
+                            })
                             .child(
                                 div()
                                     .text_size(rems(0.86))
@@ -584,14 +599,18 @@ impl CleanerView {
     ) -> Stateful<Div> {
         let t = self.system.theme;
         let row = &self.controller.rows()[ix];
-        let status = row_status(row, scanning, &t);
+        let active = self.controller.scanning_target() == Some(row.target.id);
+        let status = row_status(row, scanning, active, &t);
         let focus = &self.row_focus[ix];
         let ring = !locked && shows_focus(focus, window);
         let id = row.target.id;
-        let spoken = match &status.detail {
+        let mut spoken = match &status.detail {
             Some(detail) => format!("{}. {detail}", status.value),
             None => status.value.clone(),
         };
+        if status.updating {
+            spoken.push_str(". Updating");
+        }
 
         div()
             .id(("row", ix))
@@ -682,6 +701,12 @@ impl CleanerView {
                     .items_center()
                     .gap(rems(0.43))
                     .text_color(status.value_color)
+                    .when(active, |d| {
+                        d.child(self.pulsing(
+                            ("scan-indicator", ix),
+                            div().size(rems(0.43)).rounded_full().bg(t.accent),
+                        ))
+                    })
                     .when_some(status.icon, |d, (glyph, color)| {
                         d.child(self.icon(glyph, rems(1.), color))
                     })
@@ -757,13 +782,10 @@ impl CleanerView {
         let t = self.system.theme;
         let totals = self.controller.totals();
         let enabled = self.controller.can_clean();
-        let label = if totals.selected_bytes > 0 {
-            format!(
-                "Clean approximately {}",
-                format::size(totals.selected_bytes)
-            )
-        } else {
-            "Clean".to_string()
+        // The header's estimate, so the label stays put while a Scan updates it.
+        let label = match selected_estimate(self.controller.rows(), totals.scanning).bytes {
+            Some(bytes) if bytes > 0 => format!("Clean approximately {}", format::size(bytes)),
+            _ => "Clean".to_string(),
         };
         let ring = enabled && shows_focus(&self.clean_focus, window);
         let status = self.status_text();
@@ -923,6 +945,21 @@ impl CleanerView {
             .when(ring, |b| b.child(focus_ring(&t, px(-3.), px(7.))))
     }
 
+    /// Pulses `el` to show work in progress, unless Windows animation effects are off.
+    fn pulsing(&self, id: impl Into<ElementId>, el: Div) -> AnyElement {
+        if !self.system.animations {
+            return el.into_any_element();
+        }
+        el.with_animation(
+            id,
+            Animation::new(Duration::from_millis(1200))
+                .repeat()
+                .with_easing(pulsating_between(0.35, 1.)),
+            |el, delta| el.opacity(delta),
+        )
+        .into_any_element()
+    }
+
     fn icon(&self, glyph: &'static str, size: gpui::Rems, color: Hsla) -> Div {
         div()
             .font_family(ICON_FONT)
@@ -966,7 +1003,8 @@ impl Render for CleanerView {
 }
 
 fn is_hidden(row: &Row) -> bool {
-    row.scan == Some(ScanResult::NotPresent) && row.clean.is_none()
+    row.scan.as_ref().or(row.previous.as_ref()) == Some(&ScanResult::NotPresent)
+        && row.clean.is_none()
 }
 
 /// Counts the checked rows currently shown in the checklist. An absent Target
@@ -975,6 +1013,36 @@ fn visible_selection_count(rows: &[Row]) -> usize {
     rows.iter()
         .filter(|row| row.selected && !is_hidden(row))
         .count()
+}
+
+/// The selected estimate shown in the header and on the Clean button.
+struct SelectedEstimate {
+    /// `None` while a Scan has not reported any selected size yet.
+    bytes: Option<u64>,
+    /// A Scan has not yet reported every selected Target.
+    pending: bool,
+}
+
+/// While a Scan runs, the estimate includes previous results still shown in
+/// rows. When nothing runs, every row has a current result.
+fn selected_estimate(rows: &[Row], scanning: bool) -> SelectedEstimate {
+    let mut bytes = 0;
+    let mut known = false;
+    let mut pending = false;
+    for row in rows.iter().filter(|row| row.selected && !is_hidden(row)) {
+        pending |= row.scan.is_none();
+        if let Some(ScanResult::Complete { bytes: size }) =
+            row.scan.as_ref().or(row.previous.as_ref())
+        {
+            bytes += size;
+            known = true;
+        }
+    }
+    let pending = scanning && pending;
+    SelectedEstimate {
+        bytes: (known || !pending).then_some(bytes),
+        pending,
+    }
 }
 
 /// The shown rows' indices under each Category heading, in checklist order.
@@ -997,25 +1065,31 @@ struct RowStatus {
     icon: Option<(&'static str, Hsla)>,
     detail: Option<String>,
     detail_color: Hsla,
+    /// The value is from the previous Scan and is being replaced.
+    updating: bool,
 }
 
 /// What a row shows on the right, and the optional explanation under its name.
-fn row_status(row: &Row, scanning: bool, t: &Theme) -> RowStatus {
+/// During a Scan, a row not yet reached shows its previous result dimmed, or
+/// `Waiting`; the `active` row is the one being scanned.
+fn row_status(row: &Row, scanning: bool, active: bool, t: &Theme) -> RowStatus {
     let mut s = RowStatus {
         value: String::new(),
         value_color: t.text_secondary,
         icon: None,
         detail: None,
         detail_color: t.text_secondary,
+        updating: false,
     };
+    let previous = row.scan.is_none() && row.previous.is_some();
     let blocked = |detail: String| {
-        if row.selected {
+        if row.selected && !previous {
             format!("{detail} · Untick or rescan to Clean")
         } else {
             detail
         }
     };
-    match (&row.clean, &row.scan) {
+    match (&row.clean, row.scan.as_ref().or(row.previous.as_ref())) {
         (Some(CleanProgress::Queued), _) => s.value = "Queued".into(),
         (Some(CleanProgress::Cleaning), _) => {
             s.value = "Cleaning…".into();
@@ -1067,13 +1141,12 @@ fn row_status(row: &Row, scanning: bool, t: &Theme) -> RowStatus {
             }
             s.detail = (!notes.is_empty()).then(|| notes.join(" · "));
         }
+        (None, None) if active => {
+            s.value = "Scanning…".into();
+            s.value_color = t.text;
+        }
         (None, None) => {
-            s.value = if scanning {
-                "Scanning…"
-            } else {
-                "Not scanned"
-            }
-            .into();
+            s.value = if scanning { "Waiting" } else { "Not scanned" }.into();
             s.value_color = t.text_disabled;
         }
         (None, Some(ScanResult::Complete { bytes })) => s.value = format::size(*bytes),
@@ -1094,6 +1167,13 @@ fn row_status(row: &Row, scanning: bool, t: &Theme) -> RowStatus {
             s.value = "Not scanned".into();
             s.detail = Some(blocked("Scan stopped".into()));
         }
+    }
+    if previous {
+        s.value_color = t.text_disabled;
+        s.icon = s.icon.map(|(glyph, _)| (glyph, t.text_disabled));
+        // Keep the detail line so the row keeps its height while it updates.
+        s.detail_color = t.text_disabled;
+        s.updating = true;
     }
     s
 }
@@ -1139,6 +1219,30 @@ mod tests {
     use crate::targets::TARGETS;
 
     #[test]
+    fn rescan_estimate_keeps_previous_sizes_until_scanned() {
+        let mut rows: Vec<Row> = TARGETS
+            .iter()
+            .map(|target| Row {
+                target,
+                selected: matches!(target.id, "user-temp" | "windows-temp"),
+                scan: None,
+                previous: None,
+                clean: None,
+            })
+            .collect();
+        let estimate = selected_estimate(&rows, true);
+        assert_eq!((estimate.bytes, estimate.pending), (None, true));
+        rows[0].previous = Some(ScanResult::Complete { bytes: 4 });
+        rows[1].scan = Some(ScanResult::Complete { bytes: 5 });
+        let estimate = selected_estimate(&rows, true);
+        assert_eq!((estimate.bytes, estimate.pending), (Some(9), true));
+        rows[0].scan = Some(ScanResult::Complete { bytes: 1 });
+        rows[0].previous = None;
+        let estimate = selected_estimate(&rows, true);
+        assert_eq!((estimate.bytes, estimate.pending), (Some(6), false));
+    }
+
+    #[test]
     fn absent_targets_and_empty_categories_are_hidden() {
         let mut rows: Vec<Row> = TARGETS
             .iter()
@@ -1149,6 +1253,7 @@ mod tests {
                     "chrome-cache" | "directx-shader-cache" => ScanResult::NotPresent,
                     _ => ScanResult::Complete { bytes: 1 },
                 }),
+                previous: None,
                 clean: None,
             })
             .collect();

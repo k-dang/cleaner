@@ -806,11 +806,13 @@ fn mixed_scan_and_clean_report_each_target_in_order() {
     assert_eq!(
         events,
         [
+            Event::Scanning("recycle-bin"),
             Event::RecycleBinScanned(
                 "recycle-bin",
                 ScanResult::Complete { bytes: 300 },
                 vec![drive('C'), drive('D')]
             ),
+            Event::Scanning("user-temp"),
             Event::Scanned("user-temp", ScanResult::Complete { bytes: 3 }),
             Event::Finished,
         ]

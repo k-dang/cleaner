@@ -97,6 +97,7 @@ pub fn scan_targets(
         if stop.load(Ordering::Acquire) {
             break;
         }
+        report(Event::Scanning(id));
         report(match &target(id).content {
             Content::Folders { folders, min_age } => {
                 let result = scan_folders(folders, *min_age, roots, time, stop, &mut |_| {});
