@@ -26,6 +26,7 @@ See [`CONTEXT.md`](CONTEXT.md) for the domain terms (Target, Minimum age, Select
 |---|---|---|---|---|
 | Windows | User temp | `%LOCALAPPDATA%\Temp` | 24 hours | Yes |
 | Windows | Windows temp | `%WINDIR%\Temp` | 24 hours | Yes |
+| Windows | Recycle Bin | Your Recycle Bin on each local fixed drive, emptied through Windows | – | Yes |
 | Windows | Thumbnail cache | `thumbcache_*.db` in `%LOCALAPPDATA%\Microsoft\Windows\Explorer` | – | Yes |
 | Windows | Crash dumps and error reports | `%LOCALAPPDATA%\CrashDumps`, per-user and machine WER report folders | – | Yes |
 | Windows | DirectX shader cache | `%LOCALAPPDATA%\D3DSCache` | – | No |
@@ -34,20 +35,21 @@ See [`CONTEXT.md`](CONTEXT.md) for the domain terms (Target, Minimum age, Select
 | Developer | pip cache | `%LOCALAPPDATA%\pip\cache` | – | No |
 | Developer | Go build cache | `%LOCALAPPDATA%\go-build` | – | No |
 
-The table is fixed in [`src/targets.rs`](src/targets.rs). Neither the saved Selection nor the UI can add paths. The Recycle Bin Target is not built yet.
+The table is fixed in [`src/targets.rs`](src/targets.rs). Neither the saved Selection nor the UI can add paths.
 
 ## Safety
 
 - **Only listed contents.** The app deletes eligible contents of each Target folder and keeps the folder itself. It never touches cookies, history, saved sessions, passwords, or form data.
 - **No link following.** It never follows symlinks, junctions, or other reparse points. It works through directory handles, so a folder renamed or swapped during a Clean cannot redirect deletion elsewhere.
 - **Minimum age.** The temp Targets keep files modified within the 24 hours before the operation starts, and Clean rechecks the age. This lowers the risk of deleting working files but does not prove a file is unused.
+- **Recycle Bin through Windows.** The app queries and empties the Recycle Bin only through the Windows shell, never by opening `$Recycle.Bin`. Clean empties only the drives the latest Scan covered. Windows reports no per-file results, so the result says the bin was emptied without a deleted size.
 - **No forcing.** It never takes ownership, changes permissions, closes apps, or schedules deletion on reboot. Rejected deletions are skipped and reported by reason.
 - **Offline.** The app makes no network calls and has no telemetry or updater.
 - **Estimates stay estimates.** Hard links, compression, and running apps can make reclaimed disk space differ from the deleted file sizes.
 
 ### Validation status
 
-Clean is enabled. The core and controller pass disposable-folder checks, but the packaged app has not passed a destructive end-to-end test in an isolated Windows installation or concurrent owner-behavior validation. Kevin explicitly waived those checks for the temp Targets on 2026-09-27. [Issue 03](.scratch/cleaner-v1/issues/03-add-folder-based-targets.md) records the evidence for each other Target, including the Windows Targets that have only Disk Cleanup references and no owner-behavior check.
+Clean is enabled. The core and controller pass disposable-folder checks, but the packaged app has not passed a destructive end-to-end test in an isolated Windows installation or concurrent owner-behavior validation. Kevin explicitly waived those checks for the temp Targets on 2026-09-27. [Issue 03](.scratch/cleaner-v1/issues/03-add-folder-based-targets.md) records the evidence for each other Target, including the Windows Targets that have only Disk Cleanup references and no owner-behavior check. Kevin confirmed on 2026-09-30 that emptying a real Recycle Bin works; [Issue 04](.scratch/cleaner-v1/issues/04-add-recycle-bin-cleanup.md) lists the Recycle Bin cases that were tested only against a fake shell.
 
 ## Install
 

@@ -49,6 +49,8 @@ pub struct System {
     pub theme: Theme,
     /// The Windows "Text size" accessibility setting, from 1.0 to 2.25.
     pub text_scale: f32,
+    /// The Windows "Animation effects" setting.
+    pub animations: bool,
 }
 
 impl System {
@@ -63,6 +65,10 @@ impl System {
             .as_ref()
             .and_then(|s| s.TextScaleFactor().ok())
             .unwrap_or(1.0) as f32;
+        let animations = settings
+            .as_ref()
+            .and_then(|s| s.AnimationsEnabled().ok())
+            .unwrap_or(true);
         let dark = color(UIColorType::Foreground).is_some_and(|c| is_light(&c));
         let theme = if high_contrast_on() {
             Theme::high_contrast()
@@ -72,7 +78,11 @@ impl System {
         } else {
             Theme::light(color(UIColorType::AccentDark1).map_or(rgb(0x005fb8), to_rgba))
         };
-        Self { theme, text_scale }
+        Self {
+            theme,
+            text_scale,
+            animations,
+        }
     }
 }
 
