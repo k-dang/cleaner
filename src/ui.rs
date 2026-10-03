@@ -82,9 +82,11 @@ fn fit_window(window: &Window, content: Size<Pixels>, cx: &App) {
         .detach();
 }
 
+/// Resizes `hwnd` so its client area is `content` at `scale`, centered on its
+/// current position and clamped to the monitor's work area.
 fn set_window_content_size(hwnd: HWND, content: Size<Pixels>, scale: f32) {
-    // SAFETY: `hwnd` is a window handle (calls on a destroyed one fail harmlessly),
-    // and every out-pointer refers to a local.
+    // SAFETY: every out-pointer refers to a local. A handle is not memory, so if
+    // the window closed before this task ran, the calls fail without effect.
     unsafe {
         #[expect(
             clippy::cast_possible_truncation,
@@ -799,7 +801,7 @@ impl CleanerView {
             _ => "Clean".to_string(),
         };
         let ring = enabled && shows_focus(&self.clean_focus, window);
-        let status = self.status_text();
+        let status = self.status_line();
 
         div()
             .flex()
@@ -815,17 +817,17 @@ impl CleanerView {
                 div()
                     .id("result")
                     .role(Role::Status)
-                    .aria_label(status.as_ref().map(|(text, _)| text.clone()).unwrap_or_default())
+                    .aria_label(status.as_ref().map(|s| s.text.clone()).unwrap_or_default())
                     .a11y_synthetic_children(|b| b.parent_node().set_live(accesskit::Live::Polite))
                     .flex()
                     .items_center()
                     .gap(rems(0.43))
-                    .when_some(status, |d, (text, error)| {
-                        d.when(error, |d| {
+                    .when_some(status, |d, status| {
+                        d.when(status.error, |d| {
                             d.text_color(t.critical)
                                 .child(self.icon(ICON_ERROR, rems(1.), t.critical))
                         })
-                        .child(text)
+                        .child(status.text)
                     }),
             )
             .child(
@@ -881,37 +883,37 @@ impl CleanerView {
             )
     }
 
-    /// The line under the checklist: handoff and Clean progress, then the last
-    /// result. A Selection error is marked so it renders like a row error.
-    fn status_text(&self) -> Option<(String, bool)> {
+    /// The line under the checklist: handoff and Clean progress, then the last result.
+    fn status_line(&self) -> Option<StatusLine> {
         if self.controller.is_closing() {
-            return Some(("Stopping…".into(), false));
+            return Some(StatusLine::info("Stopping…"));
         }
         if let Some(error) = self.controller.selection_error() {
-            return Some((error.into(), true));
+            return Some(StatusLine::error(error));
         }
-        let progress = |text: String| Some((text, false));
         if !self.controller.is_selection_loaded() {
-            return progress("Loading Selection…".into());
+            return Some(StatusLine::info("Loading Selection…"));
         }
         if self.controller.is_saving() {
-            return progress("Saving Selection…".into());
+            return Some(StatusLine::info("Saving Selection…"));
         }
         let rows = self.controller.rows();
         if self.controller.selection_locked() {
             let queued = rows.iter().filter(|r| r.clean.is_some()).count();
             if queued == 0 {
-                return progress("Stopping the Scan to start Clean…".into());
+                return Some(StatusLine::info("Stopping the Scan to start Clean…"));
             }
             let done = rows
                 .iter()
                 .filter(|r| matches!(r.clean, Some(CleanProgress::Done(_))))
                 .count();
-            return progress(format!("Cleaning… {done} of {queued} Targets finished"));
+            return Some(StatusLine::info(format!(
+                "Cleaning… {done} of {queued} Targets finished"
+            )));
         }
         self.controller
             .last_clean()
-            .map(|results| (format::clean_summary(results), false))
+            .map(|results| StatusLine::info(format::clean_summary(results)))
     }
 
     fn checkbox(&self, checked: bool, enabled: bool) -> Div {
@@ -1081,6 +1083,28 @@ fn sections(rows: &[Row]) -> Vec<(Category, Vec<usize>)> {
             (!shown.is_empty()).then_some((category, shown))
         })
         .collect()
+}
+
+/// The text under the checklist. An error renders like a row error.
+struct StatusLine {
+    text: String,
+    error: bool,
+}
+
+impl StatusLine {
+    fn info(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            error: false,
+        }
+    }
+
+    fn error(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            error: true,
+        }
+    }
 }
 
 struct RowStatus {
