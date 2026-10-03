@@ -735,7 +735,9 @@ impl CleanerView {
             return None;
         }
         let thumb = thumb_length(viewport, max);
-        let scrolled = -self.list.offset().y;
+        // Wheel events move the offset past either end until the next layout clamps it,
+        // so clamp here too or the thumb overshoots the track for a frame.
+        let scrolled = (-self.list.offset().y).clamp(px(0.), max);
         let top = (viewport - thumb) * (scrolled / max);
         let dragging = self.thumb_drag.is_some();
         Some(
