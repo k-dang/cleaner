@@ -18,7 +18,7 @@ A small, offline Windows 11 app for reviewing and permanently deleting caches an
 
 Rows update while the Scan runs. A Target that could not be fully inspected shows the reason, such as *Access denied*, and blocks Clean until you untick it or rescan. Clean stays available while unticked Targets are still scanning.
 
-See [`CONTEXT.md`](CONTEXT.md) for the domain terms (Target, Minimum age, Selection, Scan, Clean) and [`.scratch/cleaner-v1/`](.scratch/cleaner-v1/) for the full spec and issues.
+See [`CONTEXT.md`](CONTEXT.md) for the domain terms (Target, Minimum age, Selection, Scan, Clean).
 
 ## Targets
 
@@ -37,6 +37,23 @@ See [`CONTEXT.md`](CONTEXT.md) for the domain terms (Target, Minimum age, Select
 
 The table is fixed in [`src/targets.rs`](src/targets.rs). Neither the saved Selection nor the UI can add paths.
 
+### Why these Targets
+
+A cache folder existing is not enough. Each Target is admitted on a primary reference or an owner check: [`scripts/owner-checks`](scripts/owner-checks) fills a scratch cache, deletes part of it the way a partial or interrupted Clean can, and runs the owner again.
+
+| Target | Decision | Evidence |
+|---|---|---|
+| User temp, Windows temp | Admitted | Applications create working files there; the 24-hour Minimum age keeps recent ones. |
+| Recycle Bin | Admitted | Queried and emptied through `SHQueryRecycleBinW` and `SHEmptyRecycleBinW`. |
+| Thumbnail cache | Admitted | Windows Disk Cleanup registers a `Thumbnail Cache` handler. Explorer keeps some files open; those are skipped. |
+| Crash dumps and error reports | Admitted | Disk Cleanup cleans `Windows Error Reporting Files`; `CrashDumps` is WER's default local dump folder. |
+| DirectX shader cache | Admitted, unticked | Disk Cleanup registers a `D3D Shader Cache` handler. |
+| Chrome cache | Admitted | Chrome loaded pages and rebuilt its caches after concurrent, partial, and full deletion, keeping `Preferences`. |
+| pnpm store, pip cache, Go build cache | Admitted, unticked | Installs and builds produced identical results after partial and interrupted deletion. |
+| npm cache | Excluded | After partial deletion, the next install failed with `ENOENT`. |
+| Bun, Yarn, Cargo registry caches | Excluded | They trust partly deleted package folders and install or build with missing files. |
+| Icon cache; Edge, Brave, Firefox, Discord, VS Code, NVIDIA caches | Excluded | No owner check or primary reference for deleting them yet. |
+
 ## Safety
 
 - **Only listed contents.** The app deletes eligible contents of each Target folder and keeps the folder itself. It never touches cookies, history, saved sessions, passwords, or form data.
@@ -49,7 +66,7 @@ The table is fixed in [`src/targets.rs`](src/targets.rs). Neither the saved Sele
 
 ### Validation status
 
-Clean is enabled. The core and controller pass disposable-folder checks, but the packaged app has not passed a destructive end-to-end test in an isolated Windows installation or concurrent owner-behavior validation. Kevin explicitly waived those checks for the temp Targets on 2026-09-27. [Issue 03](.scratch/cleaner-v1/issues/03-add-folder-based-targets.md) records the evidence for each other Target, including the Windows Targets that have only Disk Cleanup references and no owner-behavior check. Kevin confirmed on 2026-09-30 that emptying a real Recycle Bin works; [Issue 04](.scratch/cleaner-v1/issues/04-add-recycle-bin-cleanup.md) lists the Recycle Bin cases that were tested only against a fake shell.
+Automated tests run real Scans and Cleans against temporary folders. A release is done when the checks pass and Kevin has run the build on his machine and confirmed that it works.
 
 ## Install
 

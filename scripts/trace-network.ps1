@@ -51,7 +51,7 @@ function Wait-Selection {
         $names = @($all | ForEach-Object { $_.Current.Name })
         $failure = $names | Where-Object { $_ -like 'Selection *' } | Select-Object -First 1
         if ($failure) { throw "Selection interaction failed: $failure" }
-        -not ($names -contains 'Saving Selection...' -or $names -contains 'Loading Selection...')
+        -not ($names -contains "Saving Selection$([char]0x2026)" -or $names -contains "Loading Selection$([char]0x2026)")
     }
 }
 function Wait-Scan {

@@ -331,6 +331,15 @@ fn file_opened_with_delete_sharing_can_be_removed() {
     let result = clean("user-temp", &roots, time, &stop);
     assert_eq!(result.status, CleanStatus::Complete);
     assert_eq!(result.deleted_bytes, Some(4));
+    // The name stays listed, pending deletion, until the holder closes. It is
+    // already gone, not inaccessible, so it must not block the next Clean.
+    assert_eq!(
+        scan("user-temp", &roots, time, &stop),
+        ScanResult::Complete { bytes: 0 }
+    );
+    let again = clean("user-temp", &roots, time, &stop);
+    assert_eq!(again.status, CleanStatus::Complete, "{again:?}");
+    assert_eq!(again.deleted_bytes, Some(0));
     drop(shared);
     assert!(!file.exists());
 }

@@ -99,9 +99,7 @@ pub fn find(id: &str) -> Option<&'static Target> {
     TARGETS.iter().find(|target| target.id == id)
 }
 
-// Admission evidence for each folder Target is recorded in
-// `.scratch/cleaner-v1/issues/03-add-folder-based-targets.md`, and for the
-// Recycle Bin in `.scratch/cleaner-v1/issues/04-add-recycle-bin-cleanup.md`.
+// Why each Target is admitted, and which were excluded, is in README.md.
 pub static TARGETS: [Target; 10] = [
     Target {
         id: "user-temp",
