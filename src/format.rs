@@ -1,6 +1,21 @@
-//! User-facing text for sizes and Clean results.
+//! User-facing text for sizes, Clean results, and errors.
+
+use std::io;
 
 use crate::results::{CleanResult, CleanStatus, Problem, add_count};
+
+/// An I/O error as shown to the user: Windows' own message, without the
+/// `(os error N)` suffix std appends.
+pub fn error(error: &io::Error) -> String {
+    let text = error.to_string();
+    match error.raw_os_error() {
+        Some(code) => text
+            .strip_suffix(&format!(" (os error {code})"))
+            .unwrap_or(&text)
+            .to_string(),
+        None => text,
+    }
+}
 
 /// Formats a byte count the way Windows Explorer does (1024-based units).
 pub fn size(bytes: u64) -> String {
@@ -84,6 +99,20 @@ pub fn plural(count: u64, noun: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn errors_read_as_sentences_without_os_codes() {
+        let denied = error(&io::Error::from_raw_os_error(5));
+        assert!(
+            !denied.is_empty() && !denied.contains("os error"),
+            "{denied}"
+        );
+        let custom = io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Selection must be a JSON object",
+        );
+        assert_eq!(error(&custom), "Selection must be a JSON object");
+    }
 
     #[test]
     fn summary_reports_known_deletions_and_rejected_files() {

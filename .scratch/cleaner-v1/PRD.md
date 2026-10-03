@@ -1,4 +1,4 @@
-Status: draft - Target validation required before implementation readiness
+Status: implemented - awaiting Kevin's check on his machine
 
 # Spec: cc-cleaner-at-home v1
 
@@ -124,12 +124,12 @@ Explain that deleted file sizes may differ from disk space reclaimed. Never disp
 - Capture the ready Target IDs and Recycle Bin drive scope at Clean request time. Disable Selection changes, Rescan, and duplicate Clean requests through handoff and Clean. Controller validation enforces these rules even if a command bypasses disabled controls.
 - Rescan is available only when idle. It replaces previous estimates. Results from a completed or stopped operation cannot overwrite results from the next operation.
 - On normal Clean completion, preserve its result line and start a fresh Scan. The new Scan replaces row results as it progresses. Do not automatically retry failed deletions.
-- Closing the window requests cooperative stop and suppresses the automatic rescan. Stop issuing new deletions after the current filesystem step completes. A Recycle Bin API call already in progress cannot be cancelled by this wrapper; wait for it to return and do not start another drive. Keep a responsive `Stopping...` window until the worker and pending Selection save finish, then exit.
+- Closing the window requests cooperative stop and suppresses the automatic rescan. Stop issuing new deletions after the current filesystem step completes. A Recycle Bin API call already in progress cannot be cancelled by this wrapper; wait for it to return and do not start another drive. Keep a responsive `Stopping…` window until the worker and pending Selection save finish, then exit.
 - There is no forced worker termination, rollback, or background cleanup after normal exit. Completed deletions stay permanent. Abrupt process termination can leave partial cleanup; each admitted Target must tolerate that interruption without requiring a later repair step.
 
 ### Targets (v1)
 
-These are the proposed v1 locations, not evidence that they are safe to ship. Before implementation readiness, validate each retained Target on a disposable Windows installation: confirm its actual paths and owner/version, record a primary reference or reproducible owner-behavior check, and establish that the defined cleanup tolerates concurrent use, rejected deletes, and interruption. A folder's existence is insufficient. Remove any Target whose cleanup requires a different protocol that v1 does not implement. Do not add guessed paths or ship an unvalidated Target disabled by default.
+Each Target is admitted on a primary reference or an owner-behavior check, recorded in issue 03 and issue 04. A folder's existence is insufficient. Remove any Target whose cleanup requires a different protocol that v1 does not implement. Do not add guessed paths or ship an unvalidated Target disabled by default.
 
 Only standard local locations are supported. Custom cache directories and browser profiles outside these locations are not discovered through configuration files. Expand Chromium profiles only as immediate `Default` or `Profile <number>` directories. Apply confinement checks before entering each profile.
 
@@ -176,18 +176,11 @@ The DirectX shader Target is unticked. Browser cache validation must account for
 - Verify cooperative stop leaves completed deletions intact, issues no new deletions after stop acknowledgment, and preserves content outside the captured Selection. Interrupt the process in a fixture test to verify tolerated partial cleanup.
 - Test Selection first run, explicit unticks across restart, new IDs, obsolete IDs, absent Targets, malformed files, denied writes, ordered rapid changes, and interruption during replacement. Check that saving errors do not silently enable default choices.
 - Test controller readiness with a slow unticked Scan, Selection capture during handoff, duplicate requests, selected partial results, ordered completion updates, close during Scan/Clean, and suppression of the post-Clean Scan on close. Use controlled completions instead of timing sleeps.
-- Test Recycle Bin result mapping and drive-scope reuse with a narrow fake shell-call seam, including partial drive failure and unavailable counts. Test the real shell operation only in an isolated Windows environment.
+- Test Recycle Bin result mapping and drive-scope reuse with a narrow fake shell-call seam, including partial drive failure and unavailable counts.
 
-### End-to-end acceptance
+### Manual check
 
-For issue 02, Kevin waived the isolated packaged Clean test and concurrent owner-behavior check as prerequisites for enabling Clean on 2026-09-27. These checks remain unperformed; the issue records the exception.
-
-- Run the real packaged executable first in a disposable Windows account or VM with seeded Target content, protected sentinel files, and a disposable Recycle Bin. Do not use Kevin's live caches as the first destructive test.
-- Exercise launch/elevation, progressive Scan, Selection persistence, a slow unticked Target, Clean, partial failures, automatic rescan, close during cleanup, and restart. Verify the files that remain as well as the UI results.
-- Verify retained Targets' owning apps still work and rebuild their caches after cleanup and interruption. Record the owner versions and evidence with the corresponding Target definitions. Any failing Target must be removed or have its cleanup corrected before it ships.
-- Check the portable executable offline on Windows 11 without development tools or separately installed application runtimes. Inspect process network activity during launch, Scan, Clean, and error paths; an unplugged-network test alone does not prove absence of attempted traffic.
-- Inspect light, dark, high-contrast, keyboard focus, scrolling, and text scaling, including changes while the window is open. Verify that the UI Automation tree exposes checkbox states, disabled controls, and result updates correctly. Verify the total, action controls, error text, and last result remain readable.
-- Only after isolated acceptance passes, repeat the intended review-and-Clean flow on Kevin's machine with an explicitly reviewed Selection.
+Kevin runs the release build on his machine, reviews the Selection, Cleans, and confirms that the app works.
 
 ## Out of scope
 

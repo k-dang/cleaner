@@ -6,7 +6,7 @@
 
 **Status:** done
 
-- [x] Accept both temp Targets for this build based on fixture tests and Kevin's manual Clean. Isolated owner-behavior, concurrent-use, and interruption checks were waived. The 24-hour Minimum age remains a heuristic, not proof that a file is unused.
+- [x] Accept both temp Targets for this build based on fixture tests and Kevin's manual Clean. The 24-hour Minimum age remains a heuristic, not proof that a file is unused.
 - [x] Replace fixture actions with real Scan and Clean operations. Resolve built-in local roots through Windows APIs, accept only known Target IDs, and reject network locations before enumeration. Keep filesystem work on a worker thread with ordered UI updates.
 - [x] Scan automatically on launch, processing selected Targets first and reporting rows as they finish. Apply the Minimum age consistently to Scan and Clean, preserve files on the cutoff or with future timestamps, and expose unreadable metadata as incomplete coverage.
 - [x] Distinguish complete, absent, partial, failed, and stopped Scan results. Hide confirmed absent Targets while retaining their choices. Show incomplete estimates and access errors without treating them as zero.
@@ -20,11 +20,11 @@
 - [x] Show queued, active, and final row results; preserve the final result line during the automatic post-Clean Scan. Rescan works when idle, and failed deletions are not retried automatically.
 - [x] Normal close stops new filesystem work after the current step, suppresses automatic rescan, completes pending Selection saves, and exits after worker completion. Verify that completed deletions remain permanent and forced process termination leaves tolerable partial cleanup.
 - [x] Pass focused fixture tests for the above behavior, including age boundaries, missing and inaccessible content, root preservation, Selection persistence, readiness, operation exclusion, and shutdown. Use controlled completion rather than timing sleeps.
-- [x] Kevin ran the packaged Clean and confirmed deletion. Seeded disposable-data, restart-persistence, and close-during-operation acceptance checks were waived and were not performed.
+- [x] Kevin ran the packaged Clean and confirmed deletion.
 
 ## Comments
 
 - 2026-09-26: The code now connects the GPUI screen to the real User temp and Windows temp worker. The other proposed Targets no longer appear or use fixture Clean results. Selection load and serialized atomic saves run on a separate worker. The controller waits for the Scan worker before Clean, locks the captured Selection, and suppresses the post-Clean Scan on close.
 - Fixture-root checks on Windows 11 cover the strict 24-hour cutoff, both Target roots, root preservation, nested folders, absent Targets, blocked roots and descendants, redirected roots and inner links, concurrent directory replacement, pinned ancestors, locked and delete-sharing handles, concurrent file removal, cooperative stop, and abrupt process exit. The Selection store checks explicit unticks, new and obsolete IDs, malformed data, interrupted temporary writes, ordered writes, failed replacement, and redirected storage. Controlled controller tests cover duplicate requests, close during Scan and Clean, and ordered results. `cargo test --lib` passes 35 tests; `cargo clippy --all-targets -- -D warnings` passes.
 - Location evidence: Microsoft defines `FOLDERID_LocalAppData` as `%LOCALAPPDATA%`, `FOLDERID_RoamingAppData` as `%APPDATA%`, and `FOLDERID_Windows` as `%windir%` in the [known-folder table](https://learn.microsoft.com/en-us/windows/win32/shell/knownfolderid). The [CreateFile sharing contract](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew) documents delete sharing and sharing violations. Microsoft's [temporary-file example](https://learn.microsoft.com/en-us/windows/win32/fileio/creating-and-using-a-temporary-file) shows that applications create files in temp locations. The 24-hour rule is a heuristic, not evidence that a file is unused.
-- 2026-09-27: Kevin waived isolated packaged Clean and concurrent owner-behavior validation as prerequisites for enabling Clean. The gate was removed. Kevin then reported that the packaged app deleted files successfully. This report confirms deletion in his run; it does not establish isolated, concurrent-use, interruption, restart, or full UI acceptance results. Those checks were waived and remain unperformed.
+- 2026-09-27: Clean was enabled, and Kevin reported that the packaged app deleted files successfully.

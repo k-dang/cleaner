@@ -13,7 +13,8 @@ use windows::Wdk::Storage::FileSystem::{
 };
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION, HANDLE,
-    OBJ_CASE_INSENSITIVE, RPC_E_CHANGED_MODE, RtlNtStatusToDosError, UNICODE_STRING, WIN32_ERROR,
+    OBJ_CASE_INSENSITIVE, RPC_E_CHANGED_MODE, RtlNtStatusToDosError, STATUS_DELETE_PENDING,
+    UNICODE_STRING, WIN32_ERROR,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
@@ -182,6 +183,15 @@ pub(super) fn relative_open(
             0,
         )
     };
+    // A name whose deletion is pending until other handles close is already being
+    // removed, so it is treated as gone rather than as access denied, which is
+    // what the Win32 conversion below would report.
+    if code == STATUS_DELETE_PENDING {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "deletion is pending",
+        ));
+    }
     if code.is_err() {
         // SAFETY: RtlNtStatusToDosError accepts any NTSTATUS value.
         let win32 = unsafe { RtlNtStatusToDosError(code) };

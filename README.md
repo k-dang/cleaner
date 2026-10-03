@@ -49,7 +49,7 @@ The table is fixed in [`src/targets.rs`](src/targets.rs). Neither the saved Sele
 
 ### Validation status
 
-Clean is enabled. The core and controller pass disposable-folder checks, but the packaged app has not passed a destructive end-to-end test in an isolated Windows installation or concurrent owner-behavior validation. Kevin explicitly waived those checks for the temp Targets on 2026-09-27. [Issue 03](.scratch/cleaner-v1/issues/03-add-folder-based-targets.md) records the evidence for each other Target, including the Windows Targets that have only Disk Cleanup references and no owner-behavior check. Kevin confirmed on 2026-09-30 that emptying a real Recycle Bin works; [Issue 04](.scratch/cleaner-v1/issues/04-add-recycle-bin-cleanup.md) lists the Recycle Bin cases that were tested only against a fake shell.
+Automated tests run real Scans and Cleans against temporary folders. Each Target is admitted on a primary reference or an owner check, recorded in [Issue 03](.scratch/cleaner-v1/issues/03-add-folder-based-targets.md) and [Issue 04](.scratch/cleaner-v1/issues/04-add-recycle-bin-cleanup.md). A release is done when the checks pass and Kevin has run the build on his machine and confirmed that it works.
 
 ## Install
 

@@ -10,8 +10,8 @@ use std::time::{Duration, SystemTime};
 
 use futures::StreamExt;
 use gpui::{
-    AccessibleAction, Animation, AnimationExt, AnyElement, ClickEvent, Context, Div, ElementId,
-    FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement, KeyboardButton,
+    AccessibleAction, Animation, AnimationExt, AnyElement, App, ClickEvent, Context, Div,
+    ElementId, FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement, KeyboardButton,
     KeyboardClickEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Render,
     Role, ScrollHandle, Size, Stateful, StatefulInteractiveElement, Styled, Subscription, Toggled,
     Window, accesskit, actions, div, point, prelude::FluentBuilder, pulsating_between, px, rems,
@@ -64,7 +64,11 @@ pub fn window_size(text_scale: f32) -> Size<Pixels> {
 
 /// Sets the window's content size, keeping its center where it was and its frame
 /// inside the monitor's work area.
-fn fit_window(window: &Window, content: Size<Pixels>) {
+///
+/// The resize runs in a later task, as GPUI's own `Window::resize` does. Windows
+/// delivers `WM_SIZE` during `SetWindowPos`, and GPUI drops that notification while
+/// the window is being updated, which would leave the layout at the old size.
+fn fit_window(window: &Window, content: Size<Pixels>, cx: &App) {
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
         return;
     };
@@ -73,7 +77,14 @@ fn fit_window(window: &Window, content: Size<Pixels>) {
     };
     let hwnd = HWND(handle.hwnd.get() as *mut _);
     let scale = window.scale_factor();
-    // SAFETY: `hwnd` is this window's live handle, and every out-pointer refers to a local.
+    cx.foreground_executor()
+        .spawn(async move { set_window_content_size(hwnd, content, scale) })
+        .detach();
+}
+
+fn set_window_content_size(hwnd: HWND, content: Size<Pixels>, scale: f32) {
+    // SAFETY: `hwnd` is a window handle (calls on a destroyed one fail harmlessly),
+    // and every out-pointer refers to a local.
     unsafe {
         #[expect(
             clippy::cast_possible_truncation,
@@ -162,11 +173,11 @@ impl CleanerView {
         let (save_tx, save_rx) = std::sync::mpsc::channel::<Choices>();
         let (selection_tx, mut selection_rx) = futures::channel::mpsc::unbounded();
         std::thread::spawn(move || {
-            let store = SelectionStore::system().map_err(|error| error.to_string());
+            let store = SelectionStore::system().map_err(|error| format::error(&error));
             let loaded = store
                 .as_ref()
                 .map_err(Clone::clone)
-                .and_then(|store| store.load().map_err(|error| error.to_string()));
+                .and_then(|store| store.load().map_err(|error| format::error(&error)));
             selection_tx
                 .unbounded_send(SelectionEvent::Loaded(loaded))
                 .ok();
@@ -174,7 +185,7 @@ impl CleanerView {
                 let result = store
                     .as_ref()
                     .map_err(Clone::clone)
-                    .and_then(|store| store.save(&choices).map_err(|error| error.to_string()));
+                    .and_then(|store| store.save(&choices).map_err(|error| format::error(&error)));
                 selection_tx
                     .unbounded_send(SelectionEvent::Saved(result))
                     .ok();
@@ -219,7 +230,7 @@ impl CleanerView {
 
         let system = System::read();
         // Keep a large text size from pushing the window off-screen.
-        fit_window(window, window_size(system.text_scale));
+        fit_window(window, window_size(system.text_scale), cx);
         let root_focus = cx.focus_handle();
         window.focus(&root_focus, cx);
         let view = Self {
@@ -252,7 +263,7 @@ impl CleanerView {
             return;
         }
         if system.text_scale != self.system.text_scale {
-            fit_window(window, window_size(system.text_scale));
+            fit_window(window, window_size(system.text_scale), cx);
         }
         self.system = system;
         cx.notify();
@@ -804,9 +815,18 @@ impl CleanerView {
                 div()
                     .id("result")
                     .role(Role::Status)
-                    .aria_label(status.clone().unwrap_or_default())
+                    .aria_label(status.as_ref().map(|(text, _)| text.clone()).unwrap_or_default())
                     .a11y_synthetic_children(|b| b.parent_node().set_live(accesskit::Live::Polite))
-                    .when_some(status, |d, text| d.child(text)),
+                    .flex()
+                    .items_center()
+                    .gap(rems(0.43))
+                    .when_some(status, |d, (text, error)| {
+                        d.when(error, |d| {
+                            d.text_color(t.critical)
+                                .child(self.icon(ICON_ERROR, rems(1.), t.critical))
+                        })
+                        .child(text)
+                    }),
             )
             .child(
                 div()
@@ -861,33 +881,37 @@ impl CleanerView {
             )
     }
 
-    /// The line under the checklist: handoff and Clean progress, then the last result.
-    fn status_text(&self) -> Option<String> {
+    /// The line under the checklist: handoff and Clean progress, then the last
+    /// result. A Selection error is marked so it renders like a row error.
+    fn status_text(&self) -> Option<(String, bool)> {
         if self.controller.is_closing() {
-            return Some("Stopping...".into());
+            return Some(("Stopping…".into(), false));
         }
         if let Some(error) = self.controller.selection_error() {
-            return Some(error.into());
+            return Some((error.into(), true));
         }
+        let progress = |text: String| Some((text, false));
         if !self.controller.is_selection_loaded() {
-            return Some("Loading Selection...".into());
+            return progress("Loading Selection…".into());
         }
         if self.controller.is_saving() {
-            return Some("Saving Selection...".into());
+            return progress("Saving Selection…".into());
         }
         let rows = self.controller.rows();
         if self.controller.selection_locked() {
             let queued = rows.iter().filter(|r| r.clean.is_some()).count();
             if queued == 0 {
-                return Some("Stopping the Scan to start Clean…".into());
+                return progress("Stopping the Scan to start Clean…".into());
             }
             let done = rows
                 .iter()
                 .filter(|r| matches!(r.clean, Some(CleanProgress::Done(_))))
                 .count();
-            return Some(format!("Cleaning… {done} of {queued} Targets finished"));
+            return progress(format!("Cleaning… {done} of {queued} Targets finished"));
         }
-        self.controller.last_clean().map(format::clean_summary)
+        self.controller
+            .last_clean()
+            .map(|results| (format::clean_summary(results), false))
     }
 
     fn checkbox(&self, checked: bool, enabled: bool) -> Div {

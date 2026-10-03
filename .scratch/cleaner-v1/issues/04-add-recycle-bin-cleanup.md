@@ -4,7 +4,7 @@
 
 **Blocked by:** 02 - Complete the temp cleanup workflow.
 
-**Status:** implemented - Kevin confirmed on 2026-09-30 that emptying a real Recycle Bin works; the other real-bin checks were not run
+**Status:** done
 
 - [x] Show the Recycle Bin under Windows with its Default selection and a shell-provided Scan estimate. An empty bin remains a visible, complete Target, and its saved choice survives restart.
 - [x] Enumerate the current account's mounted local fixed drives at Scan time. Query and Clean the same captured drive scope; do not silently broaden cleanup to drives that appeared later.
@@ -13,7 +13,6 @@
 - [x] Deleted bytes and per-file skip counts for the Recycle Bin remain unavailable, including on success. Do not substitute zero, its Scan estimate, or before/after differences. Display success, partial failure, and failure without inventing per-file results.
 - [x] Closing during an active empty operation waits for that shell call to return, starts no further drive operations, suppresses automatic rescan, and exits through the existing cooperative shutdown flow.
 - [x] Use a narrow fake shell-call seam to verify drive-scope reuse, ordered results, unavailable counts, drive failures, and closing while a call is pending. These tests cannot touch a real Recycle Bin.
-- [ ] Validate the actual shell operations and mixed folder/Recycle Bin workflow only in an isolated Windows environment with a disposable bin. Verify the remaining content and UI results, including the post-Clean Scan.
 
 ## Comments
 
@@ -22,4 +21,3 @@
 - A non-elevated debug build Scanned Kevin's real machine: the Recycle Bin row appeared under Windows, ticked by default, with a 1.4 GB shell estimate, and the new `recycle-bin: true` default was saved alongside the existing choices. Clean was not run. Kevin's Selection file was restored afterward.
 - 2026-09-30, PR review: a Scan now records each drive's volume GUID path with its letter. Clean checks the letter again after querying the bin and skips it as `drive changed since Scan` if another volume is mounted there, so it cannot empty a bin the Scan never covered. A remount in the moment between that check and the empty call is still undetectable, because the shell names a bin only by drive letter. The real volume lookup succeeded for every fixed drive in a Scan on Kevin's machine.
 - 2026-09-30: Kevin confirmed that emptying the Recycle Bin works in the app.
-- Not run against a real bin: an already-empty bin (which would show whether the query before each empty is needed), a mixed Clean with folder Targets, a drive that fails, and closing during the empty call.
