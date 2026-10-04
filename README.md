@@ -88,7 +88,7 @@ Requires Windows 11 x64 and the Rust toolchain pinned in [`rust-toolchain.toml`]
 - The UI is built with [GPUI](https://gpui.rs/), pinned to one Zed revision in `Cargo.toml`. It renders with Direct3D 11 at feature level 10.1 or higher. The Microsoft Basic Render Driver qualifies when there is no GPU.
 - The window follows the Windows light, dark, and high-contrast themes and the Windows text size, including changes while it is open.
 - The C runtime is linked statically, so the executable needs no VC++ redistributable.
-- `build.rs` embeds `resources/app.manifest` and `resources/app.ico`. GPUI's own manifest feature is off, because it cannot require elevation. The icon uses resource ID 1, which GPUI loads for the window. To change it, replace `resources/app.ico` with a transparent, multi-size Windows icon and rebuild; the selected source artwork is `resources/icon-concepts/sweeping-c-v1.png`.
+- `build.rs` embeds `resources/app.manifest` and `resources/app.ico`. GPUI's own manifest feature is off, because it cannot require elevation. The icon uses resource ID 1, which GPUI loads for the window. To change it, replace `resources/app.ico` with a transparent, multi-size Windows icon and rebuild.
 
 ## Checks after a GPUI or toolchain update
 
