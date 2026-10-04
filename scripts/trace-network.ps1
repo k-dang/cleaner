@@ -56,7 +56,7 @@ function Wait-Selection {
 }
 function Wait-Scan {
     Wait-Until 'Scan completion' {
-        $button = Find-Named 'Rescan'
+        $button = Find-Named 'Scan'
         $button -and $button.Current.IsEnabled
     }
     Wait-Selection
@@ -71,8 +71,9 @@ try {
     $app = Start-Process -FilePath $Exe -PassThru -WindowStyle Normal
     Wait-Until 'window creation' { $app.Refresh(); $app.MainWindowHandle -ne 0 }
     $root = $A::FromHandle($app.MainWindowHandle)
+    # The Scan button enables once the Selection loads.
     Wait-Scan
-    'VERIFIED: launch and initial Scan finished.'
+    'VERIFIED: launch finished.'
 
     $toggled = 0
     foreach ($name in 'User temp', 'Windows temp') {
@@ -101,12 +102,12 @@ try {
     }
     if ($toggled -eq 0) { throw 'No supported Target checkbox was available; verification is incomplete.' }
 
-    $rescan = Find-Named 'Rescan'
-    $rescan.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $scan = Find-Named 'Scan'
+    $scan.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
     # Let the asynchronous UI action run before observing completion.
     Start-Sleep -Milliseconds 250
     Wait-Scan
-    'VERIFIED: manual Rescan finished.'
+    'VERIFIED: manual Scan finished.'
 
     if (-not $app.CloseMainWindow()) { throw 'Could not request app close; verification is incomplete.' }
     if (-not $app.WaitForExit(30000)) { throw 'Cleaner did not close; verification is incomplete.' }
@@ -139,6 +140,6 @@ $appEvents = @(Owned $app.Id)
 $controlEvents = @(Owned $control.Id)
 if ($controlEvents.Count -eq 0) { throw 'No curl network events captured; the trace cannot verify network inactivity.' }
 if ($appEvents.Count -ne 0) { throw "Network verification failed: Cleaner owns $($appEvents.Count) network events. Inspect $xml." }
-"PASS for exercised steps only: launch, displayed Target checkbox changes, manual Rescan, and close."
+"PASS for exercised steps only: launch, displayed Target checkbox changes, manual Scan, and close."
 "app pid $($app.Id): 0 owned network events; curl control pid $($control.Id): $($controlEvents.Count) owned network events."
 "NOT VERIFIED: Clean, Scan-to-Clean handoff, automatic post-Clean rescan. Trace: $xml"

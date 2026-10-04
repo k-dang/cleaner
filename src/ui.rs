@@ -1,4 +1,4 @@
-//! The single cleaner screen: the selected estimate and Rescan on top, the
+//! The single cleaner screen: the selected estimate and Scan on top, the
 //! scrolling checklist in the middle, and Clean with the last result at the
 //! bottom. It renders controller state and forwards user actions.
 
@@ -145,7 +145,7 @@ pub struct CleanerView {
     worker: Option<Worker>,
     system: System,
     root_focus: FocusHandle,
-    rescan_focus: FocusHandle,
+    scan_focus: FocusHandle,
     clean_focus: FocusHandle,
     /// One per controller row, in the same order.
     row_focus: Vec<FocusHandle>,
@@ -241,7 +241,7 @@ impl CleanerView {
             worker: None,
             system,
             root_focus,
-            rescan_focus: cx.focus_handle(),
+            scan_focus: cx.focus_handle(),
             clean_focus: cx.focus_handle(),
             row_focus,
             row_children,
@@ -358,8 +358,6 @@ impl CleanerView {
             SelectionEvent::Loaded(loaded) => {
                 let save = self.controller.load_selection(loaded);
                 self.send_save(save);
-                let scan = self.controller.start_scan();
-                self.dispatch(scan, cx);
             }
             SelectionEvent::Saved(result) => self.controller.save_finished(result),
         }
@@ -394,7 +392,7 @@ impl CleanerView {
         self.controller.ready_to_exit()
     }
 
-    fn rescan(&mut self, cx: &mut Context<Self>) {
+    fn scan(&mut self, cx: &mut Context<Self>) {
         let command = self.controller.start_scan();
         self.dispatch(command, cx);
         cx.notify();
@@ -415,11 +413,14 @@ impl CleanerView {
             .filter(|row| matches!(row.scan, Some(ScanResult::Complete { bytes }) if bytes > 0))
             .count();
         let selected = visible_selection_count(rows);
+        let unscanned = !totals.scanning && never_scanned(rows);
         let overview = if totals.scanning {
             match self.controller.scanning_target().and_then(targets::find) {
                 Some(target) => format!("Scanning {}…", target.name),
                 None => "Scanning…".to_string(),
             }
+        } else if unscanned {
+            "Scan to estimate the space you can reclaim".to_string()
         } else if found == 0 && totals.incomplete == 0 {
             "No eligible files found".to_string()
         } else if found == 0 {
@@ -434,6 +435,8 @@ impl CleanerView {
         let scan_note = if totals.scanning {
             let scanned = rows.iter().filter(|r| r.scan.is_some()).count();
             format!("{scanned} of {} scanned", rows.len())
+        } else if unscanned {
+            "Not scanned yet".to_string()
         } else if totals.incomplete > 0 {
             format!(
                 "Excludes {} with incomplete results",
@@ -448,7 +451,7 @@ impl CleanerView {
         );
         let estimate = selected_estimate(rows, totals.scanning);
         let pending = estimate.pending;
-        let selected_estimate = estimate.bytes.map(format::size);
+        let selected_estimate = estimate.bytes.filter(|_| !unscanned).map(format::size);
         let idle = self.controller.can_scan();
         let scrolled = self.list.offset().y < px(0.);
 
@@ -473,7 +476,11 @@ impl CleanerView {
                     // Labels take their accessible name from their value.
                     .aria_value(format!(
                         "Selected estimate: {}. {overview}. {note}",
-                        selected_estimate.as_deref().unwrap_or("calculating")
+                        selected_estimate.as_deref().unwrap_or(if unscanned {
+                            "not scanned"
+                        } else {
+                            "calculating"
+                        })
                     ))
                     .flex()
                     .flex_col()
@@ -503,6 +510,10 @@ impl CleanerView {
                                         .when(pending, |d| d.text_color(t.text_secondary))
                                         .child(estimate)
                                         .into_any_element(),
+                                    None if unscanned => number
+                                        .text_color(t.text_secondary)
+                                        .child("—")
+                                        .into_any_element(),
                                     // Nothing is known yet. Hidden text sizes the placeholder
                                     // like a number, so nothing moves when one arrives.
                                     None => self.pulsing(
@@ -530,8 +541,8 @@ impl CleanerView {
                     ),
             )
             .child(
-                self.subtle_button("rescan", &self.rescan_focus, idle, window)
-                    .aria_label("Rescan")
+                self.subtle_button("scan", &self.scan_focus, idle, window)
+                    .aria_label("Scan")
                     .gap(rems(0.43))
                     .px(rems(0.71))
                     .h(rems(2.43))
@@ -540,14 +551,14 @@ impl CleanerView {
                     .bg(t.card)
                     .text_color(if idle { t.text } else { t.text_disabled })
                     .when(idle, |b| {
-                        b.on_click(cx.listener(|this, _, _, cx| this.rescan(cx)))
+                        b.on_click(cx.listener(|this, _, _, cx| this.scan(cx)))
                     })
                     .child(self.icon(
                         ICON_REFRESH,
                         rems(1.14),
                         if idle { t.text } else { t.text_disabled },
                     ))
-                    .child("Rescan"),
+                    .child("Scan"),
             )
     }
 
@@ -1033,6 +1044,13 @@ impl Render for CleanerView {
 fn is_hidden(row: &Row) -> bool {
     row.scan.as_ref().or(row.previous.as_ref()) == Some(&ScanResult::NotPresent)
         && row.clean.is_none()
+}
+
+/// True until the first Scan reports a result. A finished Scan leaves every row
+/// with a result, so this only holds before the first Scan.
+fn never_scanned(rows: &[Row]) -> bool {
+    rows.iter()
+        .all(|row| row.scan.is_none() && row.previous.is_none())
 }
 
 /// Counts the checked rows currently shown in the checklist. An absent Target

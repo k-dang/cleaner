@@ -8,7 +8,7 @@ A small, offline Windows 11 app for reviewing and permanently deleting caches an
 
 ## How it works
 
-1. **Scan.** On launch the app Scans every Target and fills in each row as it finishes, starting with the ticked ones. The header shows the estimated size of the Selection.
+1. **Scan.** Click **Scan**. The app Scans every Target and fills in each row as it finishes, starting with the ticked ones. The header shows the estimated size of the Selection.
 2. **Review.** Tick or untick Targets. The app saves each change right away. Developer caches and the DirectX shader cache start unticked because rebuilding them costs time or downloads.
 3. **Clean.** Click **Clean approximately …**. The checklist is the confirmation. Deletion is permanent, and the app reports what it deleted, what it skipped, and why. It then Scans again.
 
@@ -95,6 +95,6 @@ Requires Windows 11 x64 and the Rust toolchain pinned in [`rust-toolchain.toml`]
 Run both scripts from an elevated PowerShell session, because the app runs elevated.
 
 - `scripts/dump-uia.ps1` prints the window's UI Automation tree: control names, roles, and checked and disabled states. Use `-Toggle <name>` or `-Invoke <name>` to act on a control first.
-- `scripts/trace-network.ps1 -Exe <path> -Dir <output folder>` traces launch, the displayed User temp and Windows temp checkbox changes (restoring the original Selection), manual Rescan, and close. The app must own 0 network events, and a successful curl positive control must own network events. The report excludes Clean, the Scan-to-Clean handoff, and the automatic post-Clean rescan, because the script exercises only non-destructive controls.
+- `scripts/trace-network.ps1 -Exe <path> -Dir <output folder>` traces launch, the displayed User temp and Windows temp checkbox changes (restoring the original Selection), a manual Scan, and close. The app must own 0 network events, and a successful curl positive control must own network events. The report excludes Clean, the Scan-to-Clean handoff, and the automatic post-Clean rescan, because the script exercises only non-destructive controls.
 
 `scripts/owner-checks` holds the owner-behavior checks used to admit or exclude Targets. They damage scratch caches and a scratch browser profile, never the real ones, and need network access.
