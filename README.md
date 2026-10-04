@@ -2,6 +2,10 @@
 
 A small, offline Windows 11 app for reviewing and permanently deleting caches and discarded files. It is a personal replacement for CCleaner: one screen, a fixed list of cleanup Targets, honest size estimates, and no network access.
 
+**[Download for Windows 11 x64](https://github.com/k-dang/cleaner/releases/latest/download/cc-cleaner.exe)** · [All releases](https://github.com/k-dang/cleaner/releases)
+
+The download link becomes available when the first stable release is published.
+
 <p align="center">
   <img src="docs/images/review.png" alt="Cleaner window after a Scan, showing Targets grouped by Category with size estimates and the Clean button" width="420">
 </p>
@@ -70,9 +74,15 @@ Automated tests run real Scans and Cleans against temporary folders. A release i
 
 ## Install
 
-There is no installer. Build `cc-cleaner.exe` (below), copy it anywhere, and run it. It needs no VC++ redistributable or other runtime. Release builds ask for administrator rights once at launch so they can reach `%WINDIR%\Temp` and the machine-wide error reports.
+Download `cc-cleaner.exe` from the [latest release](https://github.com/k-dang/cleaner/releases/latest), copy it anywhere, and run it. There is no installer, and it needs no VC++ redistributable or other runtime. Release builds ask for administrator rights once at launch so they can reach `%WINDIR%\Temp` and the machine-wide error reports. You can also build it yourself (below).
+
+Releases are currently unsigned. Windows may show an unknown publisher or SmartScreen warning, or block the app under Smart App Control.
+
+To update, close the app and replace the executable with the new download.
 
 The Selection is stored in `%APPDATA%\cc-cleaner-at-home\selection.json`. If that file is malformed or unreadable, the app starts with every Target unticked and shows the error. Nothing else is persisted.
+
+Each release includes `cc-cleaner.exe.sha256`. To check a download, run `Get-FileHash .\cc-cleaner.exe -Algorithm SHA256` in PowerShell and compare the hash with that file.
 
 ## Build and run
 
@@ -82,6 +92,22 @@ Requires Windows 11 x64 and the Rust toolchain pinned in [`rust-toolchain.toml`]
 - `cargo build --release` builds `target\release\cc-cleaner.exe`, the single file that ships. It requires elevation, so start it with `Start-Process` or from File Explorer. `cargo run --release` fails with OS error 740 unless the terminal runs as administrator.
 - Release builds compile GPUI's shaders with `fxc.exe` from the Windows SDK. Set `GPUI_FXC_PATH` if GPUI cannot find it.
 - `cargo test --lib` runs the core, Target table, Selection store, controller, checklist grouping, and formatting checks. CI also runs `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`.
+
+## Release
+
+1. Update the version in `Cargo.toml` and run `cargo check` to update `Cargo.lock`. Commit both files along with any release changes and merge them into `main`.
+2. From the merged commit, create and push the matching tag. For version `0.1.0`:
+
+   ```powershell
+   git tag -a v0.1.0 -m "Release v0.1.0"
+   git push origin v0.1.0
+   ```
+
+3. The [Release workflow](.github/workflows/release.yml) validates the version, runs the checks, and builds with locked dependencies. It creates a **draft** release with the executable, checksum, and generated change notes. Prerelease versions such as `0.2.0-rc.1` are marked as prereleases.
+4. Download the draft's executable, verify its checksum, and test that exact build on your Windows 11 machine.
+5. Review the notes and publish the draft. For a stable release, select **Set as latest release** to update the README download link.
+
+The workflow uses GitHub's built-in token and needs no additional secrets.
 
 ## Platform notes
 

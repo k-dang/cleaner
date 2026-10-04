@@ -1046,8 +1046,7 @@ fn is_hidden(row: &Row) -> bool {
         && row.clean.is_none()
 }
 
-/// True until the first Scan reports a result. A finished Scan leaves every row
-/// with a result, so this only holds before the first Scan.
+/// True until the first Scan reports a result.
 fn never_scanned(rows: &[Row]) -> bool {
     rows.iter()
         .all(|row| row.scan.is_none() && row.previous.is_none())
@@ -1069,8 +1068,7 @@ struct SelectedEstimate {
     pending: bool,
 }
 
-/// While a Scan runs, the estimate includes previous results still shown in
-/// rows. When nothing runs, every row has a current result.
+/// Includes previous results still shown while a Scan runs.
 fn selected_estimate(rows: &[Row], scanning: bool) -> SelectedEstimate {
     let mut bytes = 0;
     let mut known = false;
