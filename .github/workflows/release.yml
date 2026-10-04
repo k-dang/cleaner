@@ -23,10 +23,9 @@ jobs:
           persist-credentials: false
       - run: rustup show active-toolchain
       - name: Check tag matches package version
-        shell: pwsh
         run: |
           $metadata = cargo metadata --no-deps --format-version 1 --locked
-          if ($LASTEXITCODE -ne 0) { throw 'Could not read package metadata.' }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $package = ($metadata | ConvertFrom-Json).packages |
             Where-Object { $_.name -eq 'cc-cleaner-at-home' }
           if ($env:RELEASE_TAG -cne "v$($package.version)") {
@@ -38,28 +37,20 @@ jobs:
       - run: cargo test --locked
       - run: cargo build --release --locked --bin cc-cleaner
       - name: Create checksum
-        shell: pwsh
         run: |
           $hash = (Get-FileHash target/release/cc-cleaner.exe -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  cc-cleaner.exe" | Set-Content target/release/cc-cleaner.exe.sha256 -Encoding ascii
       - name: Create draft release
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           @'
-          ## Download
+          Download **cc-cleaner.exe** for **Windows 11 x64**. No installer or additional runtime is required. The checksum is in **cc-cleaner.exe.sha256**.
 
-          Download **cc-cleaner.exe** below for **Windows 11 x64**. No installer or additional runtime is required. The source archives are for developers.
-
-          Run the executable and approve the administrator prompt. This build is unsigned, so Windows may show an unknown publisher or SmartScreen warning, or block it under Smart App Control.
+          The app requires administrator rights and is unsigned. Windows may warn or block it.
 
           To update, close the app and replace the executable. Your saved Selection is preserved.
-
-          **Deletion is permanent.** Review the checked Targets before clicking Clean.
-
-          The SHA-256 checksum is in **cc-cleaner.exe.sha256**.
           '@ | Set-Content "$env:RUNNER_TEMP/release-notes.md" -Encoding utf8
           $releaseArgs = @(
             'release', 'create', $env:RELEASE_TAG,
@@ -71,4 +62,3 @@ jobs:
           )
           if ($env:RELEASE_TAG.Contains('-')) { $releaseArgs += '--prerelease' }
           gh @releaseArgs
-          if ($LASTEXITCODE -ne 0) { throw 'Could not create the draft release.' }

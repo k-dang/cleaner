@@ -76,7 +76,7 @@ Automated tests run real Scans and Cleans against temporary folders. A release i
 
 Download `cc-cleaner.exe` from the [latest release](https://github.com/k-dang/cleaner/releases/latest), copy it anywhere, and run it. There is no installer, and it needs no VC++ redistributable or other runtime. Release builds ask for administrator rights once at launch so they can reach `%WINDIR%\Temp` and the machine-wide error reports. You can also build it yourself (below).
 
-Releases are currently unsigned. Windows may show an unknown publisher or SmartScreen warning, or block the app under Smart App Control. Code signing is not configured in the release workflow.
+Releases are currently unsigned. Windows may show an unknown publisher or SmartScreen warning, or block the app under Smart App Control.
 
 To update, close the app and replace the executable with the new download.
 
@@ -103,11 +103,11 @@ Requires Windows 11 x64 and the Rust toolchain pinned in [`rust-toolchain.toml`]
    git push origin v0.1.0
    ```
 
-3. The [Release workflow](.github/workflows/release.yml) checks that the tag matches the package version, runs formatting, Clippy, and tests, then builds the release executable with the locked dependencies. It creates a **draft** GitHub release containing the executable, its SHA-256 checksum, download instructions, and generated change notes. Versions containing a prerelease suffix, such as `0.2.0-rc.1`, are also marked as prereleases.
-4. Download the executable from the draft, verify its checksum, and run that exact build on your Windows 11 machine. Confirm launch, elevation, Scan, and saved Selection work; check Clean only on disposable files you intend to delete.
-5. Review the release notes and publish the draft on GitHub. For a stable release, select **Set as latest release** so the README download link points to it.
+3. The [Release workflow](.github/workflows/release.yml) validates the version, runs the checks, and builds with locked dependencies. It creates a **draft** release with the executable, checksum, and generated change notes. Prerelease versions such as `0.2.0-rc.1` are marked as prereleases.
+4. Download the draft's executable, verify its checksum, and test that exact build on your Windows 11 machine.
+5. Review the notes and publish the draft. For a stable release, select **Set as latest release** to update the README download link.
 
-The workflow uses GitHub's built-in token and needs no additional secrets. It never publishes automatically or replaces an existing release. If creating a draft fails after a partial upload, inspect and delete the incomplete draft (keep its tag), then rerun the workflow.
+The workflow uses GitHub's built-in token and needs no additional secrets.
 
 ## Platform notes
 
