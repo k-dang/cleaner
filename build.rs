@@ -15,14 +15,17 @@ fn main() {
     let manifest_path = Path::new(&out).join("app.manifest");
     fs::write(&manifest_path, manifest).unwrap();
     let rc_path = Path::new(&out).join("app.rc");
+    let icon_path = Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("resources/app.ico");
     let rc = format!(
-        "#define RT_MANIFEST 24\n1 RT_MANIFEST \"{}\"\n",
-        manifest_path.display().to_string().replace('\\', "\\\\")
+        "#define RT_MANIFEST 24\n1 RT_MANIFEST \"{}\"\n1 ICON \"{}\"\n",
+        manifest_path.display().to_string().replace('\\', "\\\\"),
+        icon_path.display().to_string().replace('\\', "\\\\")
     );
     fs::write(&rc_path, rc).unwrap();
 
     println!("cargo:rerun-if-changed=resources/app.manifest");
-    // Embed the manifest in the app binary only; test binaries never need it.
+    println!("cargo:rerun-if-changed=resources/app.ico");
+    // Embed resources in the app binary only; GPUI loads icon resource 1.
     embed_resource::compile_for(&rc_path, ["cc-cleaner"], embed_resource::NONE)
         .manifest_required()
         .unwrap();
