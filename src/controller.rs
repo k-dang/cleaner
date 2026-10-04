@@ -372,10 +372,6 @@ impl Controller {
         self.selection_loaded
     }
 
-    pub fn is_saving(&self) -> bool {
-        !self.pending_saves.is_empty()
-    }
-
     /// Stop the worker and suppress a pending Clean or automatic rescan.
     pub fn close(&mut self) -> Option<Command> {
         self.closing = true;

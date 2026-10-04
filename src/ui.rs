@@ -818,6 +818,7 @@ impl CleanerView {
 
         div()
             .flex()
+            .flex_none()
             .flex_col()
             .gap(rems(0.71))
             .px(rems(1.43))
@@ -826,13 +827,16 @@ impl CleanerView {
             .border_t_1()
             .border_color(t.divider)
             .child(
-                // A polite live region, so screen readers announce Clean progress and results.
+                // Reserve two lines even when empty so status changes cannot resize the checklist.
+                // Keep the full message available to scrolling and screen readers.
                 div()
                     .id("result")
                     .role(Role::Status)
                     .aria_label(status.as_ref().map(|s| s.text.clone()).unwrap_or_default())
                     .a11y_synthetic_children(|b| b.parent_node().set_live(accesskit::Live::Polite))
                     .flex()
+                    .flex_none()
+                    .h(rems(2.86))
                     .items_center()
                     .gap(rems(0.43))
                     .when_some(status, |d, status| {
@@ -840,7 +844,15 @@ impl CleanerView {
                             d.text_color(t.critical)
                                 .child(self.icon(ICON_ERROR, rems(1.), t.critical))
                         })
-                        .child(status.text)
+                        .child(
+                            div()
+                                .id("status-text")
+                                .flex_1()
+                                .min_w_0()
+                                .max_h_full()
+                                .overflow_y_scroll()
+                                .child(status.text),
+                        )
                     }),
             )
             .child(
@@ -906,9 +918,6 @@ impl CleanerView {
         }
         if !self.controller.is_selection_loaded() {
             return Some(StatusLine::info("Loading Selection…"));
-        }
-        if self.controller.is_saving() {
-            return Some(StatusLine::info("Saving Selection…"));
         }
         let rows = self.controller.rows();
         if self.controller.selection_locked() {
@@ -1283,6 +1292,121 @@ fn focus_ring(t: &Theme, inset: Pixels, radius: Pixels) -> Div {
 mod tests {
     use super::*;
     use crate::targets::TARGETS;
+
+    #[test]
+    fn status_changes_preserve_checklist_bounds_and_scroll_position() {
+        use gpui::{AppContext, TestAppContext, WindowHandle};
+
+        fn draw(app: &mut TestAppContext, window: WindowHandle<CleanerView>) {
+            app.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+                .unwrap();
+        }
+
+        for text_scale in [1., 2.25] {
+            let mut app = TestAppContext::single();
+            let window = app.open_window(BASE_SIZE, |_, cx| {
+                let mut controller = Controller::new();
+                controller.load_selection(Ok(selection::Loaded {
+                    choices: selection::defaults(),
+                    needs_save: false,
+                }));
+                let (save_tx, _) = std::sync::mpsc::channel();
+                CleanerView {
+                    row_focus: controller
+                        .rows()
+                        .iter()
+                        .map(|_| cx.focus_handle())
+                        .collect(),
+                    controller,
+                    save_tx,
+                    worker: None,
+                    system: System {
+                        text_scale,
+                        animations: false,
+                        ..System::read()
+                    },
+                    root_focus: cx.focus_handle(),
+                    scan_focus: cx.focus_handle(),
+                    clean_focus: cx.focus_handle(),
+                    row_children: Rc::default(),
+                    list: ScrollHandle::new(),
+                    thumb_drag: None,
+                    _watcher: None,
+                    _subscriptions: Vec::new(),
+                }
+            });
+            draw(&mut app, window);
+            window
+                .update(&mut app, |view, _, cx| {
+                    view.list
+                        .set_offset(point(px(0.), -view.list.max_offset().y));
+                    cx.notify();
+                })
+                .unwrap();
+            draw(&mut app, window);
+            let (bounds, offset) = window
+                .update(&mut app, |view, _, _| {
+                    (view.list.bounds(), view.list.offset())
+                })
+                .unwrap();
+            assert!(
+                offset.y < px(0.),
+                "the checklist must be scrolled for this check"
+            );
+
+            for error in [
+                "Access denied".to_string(),
+                "The selection could not be written because the destination is unavailable. "
+                    .repeat(12),
+            ] {
+                window
+                    .update(&mut app, |view, _, cx| {
+                        view.controller.toggle(TARGETS[0].id).unwrap();
+                        view.controller.save_finished(Err(error));
+                        cx.notify();
+                    })
+                    .unwrap();
+                draw(&mut app, window);
+                window
+                    .update(&mut app, |view, _, _| {
+                        assert_eq!(
+                            view.list.bounds(),
+                            bounds,
+                            "status changed the checklist viewport at text scale {text_scale}"
+                        );
+                        assert_eq!(
+                            view.list.offset(),
+                            offset,
+                            "status moved the scrolled checklist"
+                        );
+                    })
+                    .unwrap();
+            }
+
+            window
+                .update(&mut app, |view, _, cx| {
+                    view.controller.toggle(TARGETS[0].id).unwrap();
+                    view.controller.save_finished(Ok(()));
+                    cx.notify();
+                })
+                .unwrap();
+            draw(&mut app, window);
+            window
+                .update(&mut app, |view, _, _| {
+                    assert_eq!(
+                        view.list.bounds(),
+                        bounds,
+                        "clearing status changed the checklist viewport"
+                    );
+                    assert_eq!(
+                        view.list.offset(),
+                        offset,
+                        "clearing status moved the scrolled checklist"
+                    );
+                })
+                .unwrap();
+        }
+    }
 
     #[test]
     fn rescan_estimate_keeps_previous_sizes_until_scanned() {
