@@ -3,6 +3,7 @@
 //! uses the shell.
 
 use std::io;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
@@ -10,8 +11,10 @@ use std::time::SystemTime;
 use windows::Win32::UI::Shell::{FOLDERID_LocalAppData, FOLDERID_ProgramData, FOLDERID_Windows};
 use windows::core::GUID;
 
-use crate::results::{Drive, Event, Problem};
-use crate::targets::{self, Base, Content, Target, TargetId};
+use crate::targets::{self, Base, Content, Recipe};
+use cleaner_core::controller::CleanTarget;
+use cleaner_core::results::{CleanResult, CleanStatus, Problem};
+use cleaner_core::targets::TargetId;
 
 pub mod recycle_bin;
 #[cfg(test)]
@@ -19,9 +22,18 @@ mod tests;
 mod walk;
 mod win;
 
-use recycle_bin::Shell;
+use recycle_bin::{Drive, Shell};
 use walk::{clean_folders, scan_folders};
 use win::{RootHandles, known_folder, root_handle, root_problem};
+
+/// Evidence produced by a Windows Scan and returned unchanged by the portable controller.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Snapshot {
+    Folders,
+    RecycleBin(Vec<Drive>),
+}
+
+pub type Event = cleaner_core::results::Event<Snapshot>;
 
 /// The known folders Target paths are relative to. Production roots come from
 /// Windows known-folder APIs. Tests use fixture roots.
@@ -80,7 +92,7 @@ fn validate_folder(path: PathBuf) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-fn target(id: TargetId) -> &'static Target {
+fn target(id: TargetId) -> &'static Recipe {
     targets::find(id).expect("workers receive only built-in Target IDs")
 }
 
@@ -99,40 +111,60 @@ pub fn scan_targets(
         }
         report(Event::Scanning(id));
         report(match &target(id).content {
-            Content::Folders { folders, min_age } => {
-                let result = scan_folders(folders, *min_age, roots, time, stop, &mut |_| {});
-                Event::Scanned(id, result)
+            Content::Folders { folders } => {
+                let result = scan_folders(
+                    folders,
+                    target(id).target.min_age,
+                    roots,
+                    time,
+                    stop,
+                    &mut |_| {},
+                );
+                Event::Scanned(id, result, Snapshot::Folders)
             }
             Content::RecycleBin => {
                 let (result, drives) = recycle_bin::scan(shell, stop);
-                Event::RecycleBinScanned(id, result, drives)
+                Event::Scanned(id, result, Snapshot::RecycleBin(drives))
             }
         });
     }
     report(Event::Finished);
 }
 
-/// Cleans `targets` in order, reporting when each starts and finishes, then
-/// `Finished`. The Recycle Bin is emptied only on `drives`, captured by its Scan.
+/// Cleans ready Targets using their latest Scan snapshots, reporting each result.
+/// The Recycle Bin is emptied only on the volumes captured by its Scan.
 pub fn clean_targets(
-    targets: &[TargetId],
-    drives: &[Drive],
+    targets: &[CleanTarget<Snapshot>],
     roots: &Roots,
     shell: &dyn Shell,
     time: SystemTime,
     stop: &AtomicBool,
     report: &mut dyn FnMut(Event),
 ) {
-    for &id in targets {
+    for scanned in targets {
         if stop.load(Ordering::Acquire) {
             break;
         }
+        let id = scanned.id;
         report(Event::Cleaning(id));
-        let result = match &target(id).content {
-            Content::Folders { folders, min_age } => {
-                clean_folders(folders, *min_age, roots, time, stop, &mut |_| {})
+        let result = match (&target(id).content, &scanned.snapshot) {
+            (Content::Folders { folders }, Snapshot::Folders) => clean_folders(
+                folders,
+                target(id).target.min_age,
+                roots,
+                time,
+                stop,
+                &mut |_| {},
+            ),
+            (Content::RecycleBin, Snapshot::RecycleBin(drives)) => {
+                recycle_bin::clean(shell, drives, stop)
             }
-            Content::RecycleBin => recycle_bin::clean(shell, drives, stop),
+            _ => CleanResult {
+                status: CleanStatus::Failed,
+                deleted_bytes: Some(0),
+                skipped: Vec::new(),
+                coverage_problem: Some(Problem::Metadata),
+            },
         };
         report(Event::Cleaned(id, result));
     }

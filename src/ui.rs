@@ -29,14 +29,20 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowPos, WINDOW_EX_STYLE, WINDOW_STYLE,
 };
 
-use crate::controller::{CleanProgress, Command, Controller, OpId, Row};
-use crate::core::recycle_bin::SystemShell;
-use crate::core::{self, Roots};
+use cleaner_core::controller::{CleanProgress, OpId, Row};
+
+use crate::cleanup::recycle_bin::SystemShell;
+use crate::cleanup::{self, Event, Roots, Snapshot};
 use crate::format;
-use crate::results::{CleanStatus, Event, ScanResult};
-use crate::selection::{self, Choices, SelectionStore};
-use crate::targets::{self, Category, TargetId};
+use crate::selection::SelectionStore;
+use crate::targets::{self, CATEGORIES};
 use crate::theme::{self, System, Theme};
+use cleaner_core::results::{CleanStatus, ScanResult};
+use cleaner_core::selection::{self, Choices};
+use cleaner_core::targets::TargetId;
+
+type Controller = cleaner_core::controller::Controller<Snapshot>;
+type Command = cleaner_core::controller::Command<Snapshot>;
 
 actions!(cleaner, [FocusNext, FocusPrev]);
 
@@ -207,7 +213,7 @@ impl CleanerView {
         })
         .detach();
 
-        let controller = Controller::new();
+        let controller = Controller::new(targets::catalog());
         let row_focus: Vec<FocusHandle> = controller
             .rows()
             .iter()
@@ -282,16 +288,12 @@ impl CleanerView {
             }
             Some(Command::Scan { op, targets }) => {
                 self.start_worker(op, cx, move |roots, time, stop, report| {
-                    core::scan_targets(&targets, roots, &SystemShell, time, stop, report)
+                    cleanup::scan_targets(&targets, roots, &SystemShell, time, stop, report)
                 });
             }
-            Some(Command::Clean {
-                op,
-                targets,
-                drives,
-            }) => {
+            Some(Command::Clean { op, targets }) => {
                 self.start_worker(op, cx, move |roots, time, stop, report| {
-                    core::clean_targets(&targets, &drives, roots, &SystemShell, time, stop, report)
+                    cleanup::clean_targets(&targets, roots, &SystemShell, time, stop, report)
                 });
             }
         }
@@ -416,7 +418,7 @@ impl CleanerView {
         let unscanned = !totals.scanning && never_scanned(rows);
         let overview = if totals.scanning {
             match self.controller.scanning_target().and_then(targets::find) {
-                Some(target) => format!("Scanning {}…", target.name),
+                Some(recipe) => format!("Scanning {}…", recipe.target.name),
                 None => "Scanning…".to_string(),
             }
         } else if unscanned {
@@ -575,11 +577,11 @@ impl CleanerView {
                     .id(("heading", heading))
                     .role(Role::Heading)
                     .aria_level(2)
-                    .aria_label(category.name())
+                    .aria_label(category)
                     .pt(rems(1.14))
                     .pb(rems(0.57))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(category.name())
+                    .child(category)
                     .into_any_element(),
             );
             for (pos, &ix) in shown.iter().enumerate() {
@@ -1100,8 +1102,8 @@ fn selected_estimate(rows: &[Row], scanning: bool) -> SelectedEstimate {
 
 /// The shown rows' indices under each Category heading, in checklist order.
 /// Absent Targets are hidden, and so is a Category with no shown rows.
-fn sections(rows: &[Row]) -> Vec<(Category, Vec<usize>)> {
-    Category::ALL
+fn sections(rows: &[Row]) -> Vec<(&'static str, Vec<usize>)> {
+    CATEGORIES
         .into_iter()
         .filter_map(|category| {
             let shown: Vec<usize> = (0..rows.len())
@@ -1181,14 +1183,14 @@ fn row_status(row: &Row, scanning: bool, active: bool, t: &Theme) -> RowStatus {
                     format!(
                         "{} skipped ({})",
                         format::plural(count, "file"),
-                        problem.text()
+                        format::problem_text(problem)
                     )
                 })
                 .collect();
             if let Some(problem) = result.coverage_problem {
                 notes.push(match result.status {
-                    CleanStatus::Failed => sentence(problem.text()),
-                    _ => format!("Incomplete: {}", problem.text()),
+                    CleanStatus::Failed => sentence(format::problem_text(problem)),
+                    _ => format!("Incomplete: {}", format::problem_text(problem)),
                 });
             }
             if deleted.is_none() && result.status != CleanStatus::Failed {
@@ -1229,13 +1231,13 @@ fn row_status(row: &Row, scanning: bool, active: bool, t: &Theme) -> RowStatus {
         (None, Some(ScanResult::Partial { bytes, problem })) => {
             s.icon = Some((ICON_WARNING, t.caution));
             s.value = format!("{} (incomplete)", format::size(*bytes));
-            s.detail = Some(blocked(sentence(problem.text())));
+            s.detail = Some(blocked(sentence(format::problem_text(*problem))));
             s.detail_color = t.caution;
         }
         (None, Some(ScanResult::Failed { problem })) => {
             s.icon = Some((ICON_ERROR, t.critical));
             s.value = "Scan failed".into();
-            s.detail = Some(blocked(sentence(problem.text())));
+            s.detail = Some(blocked(sentence(format::problem_text(*problem))));
             s.detail_color = t.critical;
         }
         (None, Some(ScanResult::Stopped)) => {
@@ -1305,9 +1307,9 @@ mod tests {
         for text_scale in [1., 2.25] {
             let mut app = TestAppContext::single();
             let window = app.open_window(BASE_SIZE, |_, cx| {
-                let mut controller = Controller::new();
+                let mut controller = Controller::new(targets::catalog());
                 controller.load_selection(Ok(selection::Loaded {
-                    choices: selection::defaults(),
+                    choices: selection::defaults(targets::catalog()),
                     needs_save: false,
                 }));
                 let (save_tx, _) = std::sync::mpsc::channel();
@@ -1361,7 +1363,7 @@ mod tests {
             ] {
                 window
                     .update(&mut app, |view, _, cx| {
-                        view.controller.toggle(TARGETS[0].id).unwrap();
+                        view.controller.toggle(TARGETS[0].target.id).unwrap();
                         view.controller.save_finished(Err(error));
                         cx.notify();
                     })
@@ -1385,7 +1387,7 @@ mod tests {
 
             window
                 .update(&mut app, |view, _, cx| {
-                    view.controller.toggle(TARGETS[0].id).unwrap();
+                    view.controller.toggle(TARGETS[0].target.id).unwrap();
                     view.controller.save_finished(Ok(()));
                     cx.notify();
                 })
@@ -1410,8 +1412,7 @@ mod tests {
 
     #[test]
     fn rescan_estimate_keeps_previous_sizes_until_scanned() {
-        let mut rows: Vec<Row> = TARGETS
-            .iter()
+        let mut rows: Vec<Row> = targets::catalog()
             .map(|target| Row {
                 target,
                 selected: matches!(target.id, "user-temp" | "windows-temp"),
@@ -1434,8 +1435,7 @@ mod tests {
 
     #[test]
     fn absent_targets_and_empty_categories_are_hidden() {
-        let mut rows: Vec<Row> = TARGETS
-            .iter()
+        let mut rows: Vec<Row> = targets::catalog()
             .map(|target| Row {
                 target,
                 selected: true,
@@ -1454,7 +1454,7 @@ mod tests {
             .into_iter()
             .map(|(category, indices)| {
                 (
-                    category.name(),
+                    category,
                     indices.iter().map(|&ix| rows[ix].target.id).collect(),
                 )
             })

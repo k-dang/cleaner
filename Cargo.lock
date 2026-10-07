@@ -375,13 +375,13 @@ dependencies = [
 name = "cc-cleaner-at-home"
 version = "0.1.0"
 dependencies = [
+ "cleaner-core",
  "embed-resource",
  "filetime",
  "futures",
  "gpui",
  "gpui_windows",
  "raw-window-handle",
- "serde_json",
  "tempfile",
  "windows 0.62.2",
 ]
@@ -439,6 +439,13 @@ dependencies = [
  "glob",
  "libc",
  "libloading",
+]
+
+[[package]]
+name = "cleaner-core"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

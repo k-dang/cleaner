@@ -1,6 +1,11 @@
 use std::{env, fs, path::Path};
 
 fn main() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        panic!(
+            "The desktop app requires Windows. Build or test the portable core with cargo test -p cleaner-core."
+        );
+    }
     // Release builds require elevation. Debug builds run as the invoking user so
     // `cargo run` works from a normal terminal.
     let level = match env::var("PROFILE").as_deref() {

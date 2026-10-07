@@ -32,9 +32,9 @@ jobs:
             throw "Tag $env:RELEASE_TAG must match Cargo.toml version v$($package.version)."
           }
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
       - run: cargo build --release --locked --bin cc-cleaner
       - name: Create checksum
         run: |

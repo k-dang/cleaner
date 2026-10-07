@@ -15,8 +15,8 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::UI::Shell::{FOLDERID_LocalAppData, FOLDERID_Windows};
 
-use crate::results::{CleanResult, CleanStatus, Event, Problem, ScanResult};
-use crate::targets::{Base, Content, Folders, TargetId};
+use crate::targets::{Base, Content, Folders};
+use cleaner_core::results::{CleanResult, CleanStatus, Problem, ScanResult};
 
 use super::recycle_bin::tests::{FakeShell, bin, drive};
 use super::win::{classify, os_error, win32_code};
@@ -27,7 +27,7 @@ const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 /// The folders and Minimum age of a built-in folder Target.
 fn folders(id: TargetId) -> (&'static Folders, Option<Duration>) {
     match &target(id).content {
-        Content::Folders { folders, min_age } => (folders, *min_age),
+        Content::Folders { folders } => (folders, target(id).target.min_age),
         Content::RecycleBin => panic!("{id} is not a folder Target"),
     }
 }
@@ -788,7 +788,11 @@ fn abrupt_exit_leaves_a_usable_partial_target() {
     write_at(&target.join("a"), b"a", time - DAY - DAY);
     write_at(&target.join("b"), b"b", time - DAY - DAY);
     let child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "core::tests::abrupt_exit_helper", "--nocapture"])
+        .args([
+            "--exact",
+            "cleanup::tests::abrupt_exit_helper",
+            "--nocapture",
+        ])
         .env("CLEANER_INTERRUPT_DIR", dir.path())
         .status()
         .unwrap();
@@ -816,20 +820,32 @@ fn mixed_scan_and_clean_report_each_target_in_order() {
         events,
         [
             Event::Scanning("recycle-bin"),
-            Event::RecycleBinScanned(
+            Event::Scanned(
                 "recycle-bin",
                 ScanResult::Complete { bytes: 300 },
-                vec![drive('C'), drive('D')]
+                Snapshot::RecycleBin(vec![drive('C'), drive('D')])
             ),
             Event::Scanning("user-temp"),
-            Event::Scanned("user-temp", ScanResult::Complete { bytes: 3 }),
+            Event::Scanned(
+                "user-temp",
+                ScanResult::Complete { bytes: 3 },
+                Snapshot::Folders
+            ),
             Event::Finished,
         ]
     );
     events.clear();
-    clean_targets(&ids, &[drive('C')], &roots, &shell, time, &stop, &mut |e| {
-        events.push(e)
-    });
+    let ready = [
+        CleanTarget {
+            id: "recycle-bin",
+            snapshot: Snapshot::RecycleBin(vec![drive('C')]),
+        },
+        CleanTarget {
+            id: "user-temp",
+            snapshot: Snapshot::Folders,
+        },
+    ];
+    clean_targets(&ready, &roots, &shell, time, &stop, &mut |e| events.push(e));
     let emptied = CleanResult {
         status: CleanStatus::Complete,
         deleted_bytes: None,
@@ -853,6 +869,70 @@ fn mixed_scan_and_clean_report_each_target_in_order() {
         ]
     );
     assert!(!target.join("old").exists());
+}
+
+#[test]
+fn scan_snapshots_survive_controller_handoff_and_reject_remounted_volumes() {
+    use cleaner_core::controller::{Command, Controller};
+    use cleaner_core::selection::{self, Loaded};
+
+    let (_dir, roots, target, time) = fixture();
+    let old = target.join("old");
+    let recent = target.join("recent");
+    write_at(&old, b"old", time - DAY - DAY);
+    write_at(&recent, b"keep", time);
+    let shell = FakeShell::new(&[('C', bin(300, 2)), ('D', bin(200, 1))]);
+    let stop = AtomicBool::new(false);
+    let mut controller = Controller::<Snapshot>::new(targets::catalog());
+    controller.load_selection(Ok(Loaded {
+        choices: selection::choices(targets::catalog(), |target| {
+            matches!(target.id, "user-temp" | "recycle-bin")
+        }),
+        needs_save: false,
+    }));
+    let Command::Scan { op, targets } = controller.start_scan().unwrap() else {
+        panic!("expected Scan")
+    };
+    scan_targets(&targets, &roots, &shell, time, &stop, &mut |event| {
+        assert!(controller.apply(op, event).is_none());
+    });
+
+    // A new drive was not scanned, and D now names a different volume.
+    shell.bins.lock().unwrap().insert('E', bin(900, 1));
+    shell.volumes.lock().unwrap().insert('D', drive('X').volume);
+    shell.calls.lock().unwrap().clear();
+    let Command::Clean { op, targets } = controller.request_clean().unwrap() else {
+        panic!("expected Clean")
+    };
+    assert_eq!(
+        targets,
+        [
+            CleanTarget {
+                id: "user-temp",
+                snapshot: Snapshot::Folders,
+            },
+            CleanTarget {
+                id: "recycle-bin",
+                snapshot: Snapshot::RecycleBin(vec![drive('C'), drive('D')]),
+            },
+        ]
+    );
+    clean_targets(&targets, &roots, &shell, time, &stop, &mut |event| {
+        controller.apply(op, event);
+    });
+
+    assert!(!old.exists());
+    assert!(recent.exists(), "Clean must still recheck Minimum age");
+    assert_eq!(
+        *shell.calls.lock().unwrap(),
+        [("query", 'C'), ("empty", 'C'), ("query", 'D')]
+    );
+    assert_eq!(shell.bins.lock().unwrap()[&'D'], bin(200, 1));
+    assert_eq!(shell.bins.lock().unwrap()[&'E'], bin(900, 1));
+    let results = controller.last_clean().unwrap();
+    assert_eq!(results[0].deleted_bytes, Some(3));
+    assert_eq!(results[1].status, CleanStatus::Partial);
+    assert_eq!(results[1].coverage_problem, Some(Problem::LocationChanged));
 }
 
 #[test]

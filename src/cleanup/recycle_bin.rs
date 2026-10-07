@@ -11,7 +11,15 @@ use windows::Win32::UI::Shell::{
 };
 
 use super::win::{classify, drive_root, is_fixed_drive, os_error, with_com};
-use crate::results::{CleanResult, CleanStatus, Drive, Problem, ScanResult};
+use cleaner_core::results::{CleanResult, CleanStatus, Problem, ScanResult};
+
+/// A drive whose Recycle Bin a Scan covered: its letter and the volume mounted
+/// there, as a volume GUID path such as `\\?\Volume{...}\`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Drive {
+    pub letter: char,
+    pub volume: String,
+}
 
 /// One drive's Recycle Bin, as the shell reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,7 +160,7 @@ pub fn clean(shell: &dyn Shell, drives: &[Drive], stop: &AtomicBool) -> CleanRes
         match shell.volume(drive.letter) {
             Ok(volume) if volume == drive.volume => {}
             Ok(_) => {
-                problem.get_or_insert(Problem::DriveChanged);
+                problem.get_or_insert(Problem::LocationChanged);
                 continue;
             }
             Err(error) => {
@@ -365,7 +373,7 @@ pub(crate) mod tests {
         let result = clean(&shell, &drives, &stop);
         assert_eq!(
             (result.status, result.coverage_problem),
-            (CleanStatus::Partial, Some(Problem::DriveChanged))
+            (CleanStatus::Partial, Some(Problem::LocationChanged))
         );
         assert_eq!(
             *shell.calls.lock().unwrap(),

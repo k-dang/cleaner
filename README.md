@@ -86,12 +86,22 @@ Each release includes `cc-cleaner.exe.sha256`. To check a download, run `Get-Fil
 
 ## Build and run
 
-Requires Windows 11 x64 and the Rust toolchain pinned in [`rust-toolchain.toml`](rust-toolchain.toml).
+Building the desktop app requires Windows 11 x64 and the Rust toolchain pinned in [`rust-toolchain.toml`](rust-toolchain.toml). The portable core can be built and tested on Windows, macOS, and Linux.
 
 - `cargo run` starts a debug build as the current user. It scans the real Target folders. Debug builds do not ask for elevation, so Windows temp and crash reports can report access errors unless the terminal runs as administrator.
 - `cargo build --release` builds `target\release\cc-cleaner.exe`, the single file that ships. It requires elevation, so start it with `Start-Process` or from File Explorer. `cargo run --release` fails with OS error 740 unless the terminal runs as administrator.
 - Release builds compile GPUI's shaders with `fxc.exe` from the Windows SDK. Set `GPUI_FXC_PATH` if GPUI cannot find it.
-- `cargo test --lib` runs the core, Target table, Selection store, controller, checklist grouping, and formatting checks. CI also runs `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`.
+- `cargo test --workspace --locked` runs the portable workflow and Selection checks plus the Windows cleanup, Target table, Selection store, startup, checklist, and formatting checks.
+- `cargo test -p cleaner-core --locked` runs only the portable core on any of the three platforms, without building GPUI or Windows dependencies. CI runs this and core Clippy on Windows, macOS, and Linux.
+- Windows CI also runs `cargo fmt --all --check` and `cargo clippy --workspace --all-targets --locked -- -D warnings`.
+
+### Architecture and portability
+
+The workspace has two packages. [`cleaner-core`](crates/cleaner-core/src/lib.rs) owns Target metadata, Selection parsing and serialization, Scan/Clean coordination, and results. The root `cc-cleaner-at-home` package owns the Windows desktop app: GPUI, startup, system appearance, durable Selection storage, the fixed Windows Target catalog, and [`cleanup`](src/cleanup.rs).
+
+The controller receives a catalog from the native app. Each Scan result carries a native Scan snapshot, which the controller retains without interpreting it and passes back with that Target's Clean request. Windows folder Targets retain their handle-based cleanup procedure; the Recycle Bin snapshot retains only the volumes that Scan covered. Starting a new Scan discards the previous snapshots, and late reports cannot replace current ones.
+
+The desktop app and releases remain Windows-only. A second native app must supply its own verified Targets, equivalent deletion protections, storage, and UI. See [ADR 0001](docs/adr/0001-portable-core-and-windows-app.md) for the separation decision.
 
 ## Release
 

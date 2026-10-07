@@ -6,8 +6,25 @@ on:
     branches: [main]
 
 jobs:
+  core:
+    name: Portable core (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy -p cleaner-core --all-targets --locked -- -D warnings
+      - run: cargo test -p cleaner-core --locked
+
   check:
-    # The app uses Win32 and GPUI's Windows backend, so it only builds on Windows.
+    # The native cleanup implementation and GPUI screen remain Windows-only.
     runs-on: windows-latest
     env:
       # Fetching the pinned zed repository is much faster with the git CLI.
@@ -17,6 +34,6 @@ jobs:
       # rust-toolchain.toml selects the pinned toolchain and components.
       - run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked

@@ -1,0 +1,7 @@
+# Portable core with a Windows desktop app
+
+The shared cleanup workflow will build and test on Windows, macOS, and Linux, while the desktop app remains Windows-only. We chose this scope over delivering a second native app in the same change: a native port also needs verified cleanup Targets, equivalent deletion protections, and native UI validation. The separation preserves the current Windows behavior and makes operating-system ownership explicit.
+
+The repository will use two Rust packages: a UI-free portable core and the Windows desktop app. The core owns the workflow, Selection rules, Target metadata, and results; the app owns native cleanup recipes and execution, durable storage, GPUI, appearance, startup, and packaging. Separate dependency lists make accidental coupling visible to the compiler and keep portable tests independent of graphics libraries. We chose this over a single package with conditional modules or a GPUI-dependent shared library.
+
+Each Target's Scan returns an opaque native snapshot alongside its result. The core accepts snapshots only from the current operation, clears them when a new Scan starts, and returns the selected Targets' snapshots explicitly to Clean. This preserves the Recycle Bin's covered volume identities across separate worker threads without exposing Windows drive letters to the shared workflow; storing that information implicitly in a backend session would hide the handoff from workflow tests.
