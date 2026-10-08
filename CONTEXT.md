@@ -28,6 +28,10 @@ _Avoid_: Profile, settings, config
 Estimating the size of eligible content in each Target without changing it. The estimate can differ from a later Clean result or the disk space actually reclaimed.
 _Avoid_: Analyze, check
 
+**Scan snapshot**:
+The information a Target's Scan records to constrain a later Clean when its cleanup procedure requires it. A snapshot belongs to that Target and the latest Scan; it does not freeze the files or make the estimate exact.
+_Avoid_: Token, plan, cached paths
+
 **Clean**:
 Attempting permanent deletion of eligible content in the captured Selection using each Target's verified procedure. It reports completed work and failures without forcing deletion or guaranteeing that running apps are unaffected.
 _Avoid_: Wipe, purge, run

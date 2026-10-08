@@ -1,6 +1,5 @@
 //! Durable Selection storage. The file contains only built-in Target IDs and booleans.
 
-use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
@@ -13,24 +12,18 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::core::HSTRING;
 
-use crate::targets::{TARGETS, Target};
+use crate::targets;
+use cleaner_core::selection::{self, Choices, Loaded};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
-
-pub type Choices = BTreeMap<String, bool>;
 
 pub struct SelectionStore {
     path: PathBuf,
 }
 
-pub struct Loaded {
-    pub choices: Choices,
-    pub needs_save: bool,
-}
-
 impl SelectionStore {
     pub fn system() -> io::Result<Self> {
-        Self::resolve(crate::core::validated_known_folder)
+        Self::resolve(crate::cleanup::validated_known_folder)
     }
 
     fn resolve(
@@ -60,7 +53,7 @@ impl SelectionStore {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(Loaded {
-                    choices: defaults(),
+                    choices: selection::defaults(targets::catalog()),
                     needs_save: true,
                 });
             }
@@ -76,42 +69,12 @@ impl SelectionStore {
         }
         let mut contents = Vec::new();
         file.read_to_end(&mut contents)?;
-        let value: serde_json::Value = serde_json::from_slice(&contents)?;
-        let object = value.as_object().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Selection must be a JSON object",
-            )
-        })?;
-        if object.values().any(|value| !value.is_boolean()) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Selection values must be booleans",
-            ));
-        }
-        let mut choices = defaults();
-        let mut needs_save = object.len() != choices.len();
-        for (id, selected) in &mut choices {
-            match object.get(id) {
-                Some(value) => *selected = value.as_bool().unwrap(),
-                None => needs_save = true,
-            }
-        }
-        Ok(Loaded {
-            choices,
-            needs_save,
-        })
+        selection::parse(&contents, targets::catalog())
     }
 
     /// A synced temporary file is renamed over the old file on the same volume.
     pub fn save(&self, choices: &Choices) -> io::Result<()> {
-        let expected = defaults();
-        if choices.len() != expected.len() || expected.keys().any(|id| !choices.contains_key(id)) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "incomplete Selection",
-            ));
-        }
+        let contents = selection::serialize(choices, targets::catalog())?;
         let parent = self.path.parent().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "Selection path has no parent")
         })?;
@@ -128,8 +91,7 @@ impl SelectionStore {
                 .write(true)
                 .create_new(true)
                 .open(&temp)?;
-            serde_json::to_writer(&mut file, choices)?;
-            file.write_all(b"\n")?;
+            file.write_all(&contents)?;
             file.sync_all()?;
             drop(file);
             // SAFETY: Both paths are null-terminated and live for the call.
@@ -147,18 +109,6 @@ impl SelectionStore {
         }
         outcome
     }
-}
-
-/// Choices for every built-in Target, selected where `pick` says so.
-pub fn choices(pick: impl Fn(&Target) -> bool) -> Choices {
-    TARGETS
-        .iter()
-        .map(|target| (target.id.to_string(), pick(target)))
-        .collect()
-}
-
-pub fn defaults() -> Choices {
-    choices(|target| target.default_selected)
 }
 
 fn reject_redirected(path: &Path) -> io::Result<()> {
@@ -217,17 +167,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_new_ids_take_defaults_and_obsolete_ids_are_ignored() {
-        let (_dir, store) = store();
-        fs::write(&store.path, br#"{"user-temp":false,"obsolete":true}"#).unwrap();
-        let loaded = store.load().unwrap();
-        assert!(loaded.needs_save);
-        assert!(!loaded.choices["user-temp"]);
-        assert!(loaded.choices["windows-temp"]);
-        assert!(!loaded.choices.contains_key("obsolete"));
-    }
-
-    #[test]
     fn malformed_file_is_an_error_and_leftover_temps_are_ignored() {
         let (_dir, store) = store();
         fs::write(&store.path, b"{").unwrap();
@@ -238,7 +177,7 @@ mod tests {
     #[test]
     fn interrupted_temp_write_preserves_the_last_complete_selection() {
         let (_dir, store) = store();
-        let mut choices = defaults();
+        let mut choices = selection::defaults(targets::catalog());
         choices.insert("user-temp".into(), false);
         store.save(&choices).unwrap();
         fs::write(
@@ -252,7 +191,7 @@ mod tests {
     #[test]
     fn ordered_changes_save_the_last_explicit_choice() {
         let (_dir, store) = store();
-        let mut choices = defaults();
+        let mut choices = selection::defaults(targets::catalog());
         for selected in [false, true, false, true, false] {
             choices.insert("user-temp".into(), selected);
             store.save(&choices).unwrap();
@@ -263,7 +202,7 @@ mod tests {
     #[test]
     fn failed_replacement_keeps_the_previous_complete_selection() {
         let (_dir, store) = store();
-        let original = defaults();
+        let original = selection::defaults(targets::catalog());
         store.save(&original).unwrap();
         let original_permissions = fs::metadata(&store.path).unwrap().permissions();
         let mut readonly = original_permissions.clone();
@@ -279,7 +218,7 @@ mod tests {
     #[test]
     fn load_shares_delete_access_with_other_handles() {
         let (_dir, store) = store();
-        let mut choices = defaults();
+        let mut choices = selection::defaults(targets::catalog());
         choices.insert("user-temp".into(), false);
         store.save(&choices).unwrap();
         // Another handle that may delete or replace the file, such as a pending save.
@@ -313,7 +252,11 @@ mod tests {
         std::os::windows::fs::symlink_dir(&outside, &link).unwrap();
         let store = SelectionStore::new(link.join("choices.json"));
         assert!(store.load().is_err());
-        assert!(store.save(&defaults()).is_err());
+        assert!(
+            store
+                .save(&selection::defaults(targets::catalog()))
+                .is_err()
+        );
         assert!(!outside.join("choices.json").exists());
     }
 }

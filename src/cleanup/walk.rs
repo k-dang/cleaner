@@ -16,8 +16,8 @@ use windows::Win32::Storage::FileSystem::{
     FileIdInfo, FileStandardInfo, GetFileInformationByHandleEx,
 };
 
-use crate::results::{CleanResult, CleanStatus, Problem, ScanResult, add_count};
 use crate::targets::{self, Base, Folders};
+use cleaner_core::results::{CleanResult, CleanStatus, Problem, ScanResult, add_count};
 
 use super::Roots;
 use super::win::{

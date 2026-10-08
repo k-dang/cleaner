@@ -1,3 +1,7 @@
+[workspace]
+members = ["crates/cleaner-core"]
+resolver = "3"
+
 [package]
 name = "cc-cleaner-at-home"
 version = "0.1.0"
@@ -14,13 +18,15 @@ path = "src/main.rs"
 test = false
 
 [dependencies]
+cleaner-core = { path = "crates/cleaner-core" }
+
+[target.'cfg(windows)'.dependencies]
 # GPUI is pre-1.0. Keep every zed crate on the same revision, and rerun the checks
 # in README.md whenever the revision changes. The pinned revision is from 2026-09-25.
 gpui = { git = "https://github.com/zed-industries/zed", rev = "933d8d93819c749a607e561883855a9b95c79cea", default-features = false }
 gpui_windows = { git = "https://github.com/zed-industries/zed", rev = "933d8d93819c749a607e561883855a9b95c79cea", default-features = false }
 futures = "0.3"
 raw-window-handle = "0.6"
-serde_json = "1"
 # Same major version as gpui_windows, so both share one build.
 windows = { version = "0.62", features = [
     "Foundation",
@@ -42,7 +48,10 @@ windows = { version = "0.62", features = [
 ] }
 
 # CI runs Clippy with `-D warnings`, so these fail the build there.
-[lints.clippy]
+[lints]
+workspace = true
+
+[workspace.lints.clippy]
 # Byte counts must stay exact, so flag `as` casts that can truncate or change sign.
 cast_possible_truncation = "warn"
 cast_possible_wrap = "warn"
@@ -54,7 +63,7 @@ undocumented_unsafe_blocks = "warn"
 [build-dependencies]
 embed-resource = "3.0"
 
-[dev-dependencies]
+[target.'cfg(windows)'.dev-dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "933d8d93819c749a607e561883855a9b95c79cea", default-features = false, features = ["test-support"] }
 tempfile = "3"
 filetime = "0.2"

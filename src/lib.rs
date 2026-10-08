@@ -1,7 +1,5 @@
-mod controller;
-mod core;
+mod cleanup;
 mod format;
-mod results;
 mod selection;
 mod targets;
 mod theme;

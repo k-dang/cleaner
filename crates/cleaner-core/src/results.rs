@@ -10,23 +10,9 @@ pub enum Problem {
     Redirected,
     Metadata,
     NonLocal,
-    /// The drive letter mounts a different volume than the Scan found.
-    DriveChanged,
+    /// The cleanup location no longer matches the location inspected by Scan.
+    LocationChanged,
     Other,
-}
-
-impl Problem {
-    pub fn text(self) -> &'static str {
-        match self {
-            Problem::AccessDenied => "access denied",
-            Problem::SharingViolation => "sharing violation",
-            Problem::Redirected => "redirected folder skipped",
-            Problem::Metadata => "metadata unavailable",
-            Problem::NonLocal => "network location skipped",
-            Problem::DriveChanged => "drive changed since Scan",
-            Problem::Other => "I/O error",
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,7 +56,7 @@ pub fn add_count(counts: &mut Vec<(Problem, u64)>, problem: Problem, count: u64)
 pub struct CleanResult {
     pub status: CleanStatus,
     /// Known logical bytes accepted for deletion. `None` when the cleanup
-    /// procedure reports no per-file results, as the Recycle Bin's shell call does.
+    /// procedure reports no per-file results.
     pub deleted_bytes: Option<u64>,
     /// Known counts of files skipped, by reason.
     pub skipped: Vec<(Problem, u64)>,
@@ -78,21 +64,12 @@ pub struct CleanResult {
     pub coverage_problem: Option<Problem>,
 }
 
-/// A drive whose Recycle Bin a Scan covered: its letter and the volume mounted
-/// there, as a volume GUID path such as `\\?\Volume{...}\`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Drive {
-    pub letter: char,
-    pub volume: String,
-}
-
 /// A worker's report about the operation it is running, in the order it happens.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Event {
+pub enum Event<Snapshot> {
     Scanning(TargetId),
-    Scanned(TargetId, ScanResult),
-    /// The Recycle Bin's Scan, with the drives it covered. A Clean empties only these.
-    RecycleBinScanned(TargetId, ScanResult, Vec<Drive>),
+    /// The native snapshot is retained for this Target and returned unchanged to Clean.
+    Scanned(TargetId, ScanResult, Snapshot),
     Cleaning(TargetId),
     Cleaned(TargetId, CleanResult),
     /// The worker has stopped touching the filesystem for this operation.

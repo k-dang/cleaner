@@ -1,29 +1,12 @@
-//! The fixed table of built-in Targets, in checklist order. The core resolves
-//! each folder Target against `Roots`; nothing outside this table can add a path.
+//! Windows Target catalog and verified cleanup recipes, in checklist order.
+//! The portable workflow sees only metadata; native workers own paths and procedures.
 
 use std::time::Duration;
 
-pub type TargetId = &'static str;
+use cleaner_core::targets::Target as Metadata;
 
-/// A checklist heading. Targets are listed in `Category::ALL` order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Category {
-    Windows,
-    Browsers,
-    Developer,
-}
-
-impl Category {
-    pub const ALL: [Category; 3] = [Category::Windows, Category::Browsers, Category::Developer];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Category::Windows => "Windows",
-            Category::Browsers => "Browsers",
-            Category::Developer => "Developer",
-        }
-    }
-}
+/// Native checklist headings, in display order.
+pub const CATEGORIES: [&str; 3] = ["Windows", "Browsers", "Developer"];
 
 /// A known folder that Target paths are relative to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,65 +57,75 @@ pub enum Folders {
 pub enum Content {
     Folders {
         folders: Folders,
-        /// Files modified more recently than this before the operation starts are kept.
-        min_age: Option<Duration>,
     },
     /// The current account's Recycle Bin on each mounted local fixed drive,
     /// queried and emptied only through the Windows shell.
     RecycleBin,
 }
 
-/// A built-in cleanup choice, shown as one checklist row.
+/// Checklist metadata paired with its Windows cleanup procedure.
 #[derive(Debug, PartialEq, Eq)]
-pub struct Target {
-    pub id: TargetId,
-    pub name: &'static str,
-    pub category: Category,
-    pub default_selected: bool,
+pub struct Recipe {
+    pub target: Metadata,
     pub content: Content,
 }
 
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Returns the built-in Target with this ID.
-pub fn find(id: &str) -> Option<&'static Target> {
-    TARGETS.iter().find(|target| target.id == id)
+pub fn find(id: &str) -> Option<&'static Recipe> {
+    TARGETS.iter().find(|recipe| recipe.target.id == id)
+}
+
+/// Metadata accepted by the shared workflow and Selection format.
+pub fn catalog() -> impl Iterator<Item = &'static Metadata> {
+    TARGETS.iter().map(|recipe| &recipe.target)
 }
 
 // Why each Target is admitted, and which were excluded, is in README.md.
-pub static TARGETS: [Target; 10] = [
-    Target {
-        id: "user-temp",
-        name: "User temp",
-        category: Category::Windows,
-        default_selected: true,
+pub static TARGETS: [Recipe; 10] = [
+    Recipe {
+        target: Metadata {
+            id: "user-temp",
+            name: "User temp",
+            category: "Windows",
+            default_selected: true,
+            min_age: Some(DAY),
+        },
         content: Content::Folders {
             folders: Folders::Trees(&[(Base::LocalAppData, "Temp")]),
-            min_age: Some(DAY),
         },
     },
-    Target {
-        id: "windows-temp",
-        name: "Windows temp",
-        category: Category::Windows,
-        default_selected: true,
+    Recipe {
+        target: Metadata {
+            id: "windows-temp",
+            name: "Windows temp",
+            category: "Windows",
+            default_selected: true,
+            min_age: Some(DAY),
+        },
         content: Content::Folders {
             folders: Folders::Trees(&[(Base::WinDir, "Temp")]),
-            min_age: Some(DAY),
         },
     },
-    Target {
-        id: "recycle-bin",
-        name: "Recycle Bin",
-        category: Category::Windows,
-        default_selected: true,
+    Recipe {
+        target: Metadata {
+            id: "recycle-bin",
+            name: "Recycle Bin",
+            category: "Windows",
+            default_selected: true,
+            min_age: None,
+        },
         content: Content::RecycleBin,
     },
-    Target {
-        id: "thumbnail-cache",
-        name: "Thumbnail cache",
-        category: Category::Windows,
-        default_selected: true,
+    Recipe {
+        target: Metadata {
+            id: "thumbnail-cache",
+            name: "Thumbnail cache",
+            category: "Windows",
+            default_selected: true,
+            min_age: None,
+        },
         content: Content::Folders {
             folders: Folders::Files {
                 base: Base::LocalAppData,
@@ -140,14 +133,16 @@ pub static TARGETS: [Target; 10] = [
                 prefix: "thumbcache_",
                 suffix: ".db",
             },
-            min_age: None,
         },
     },
-    Target {
-        id: "crash-dumps",
-        name: "Crash dumps and error reports",
-        category: Category::Windows,
-        default_selected: true,
+    Recipe {
+        target: Metadata {
+            id: "crash-dumps",
+            name: "Crash dumps and error reports",
+            category: "Windows",
+            default_selected: true,
+            min_age: None,
+        },
         content: Content::Folders {
             folders: Folders::Trees(&[
                 (Base::LocalAppData, "CrashDumps"),
@@ -155,61 +150,70 @@ pub static TARGETS: [Target; 10] = [
                 (Base::ProgramData, r"Microsoft\Windows\WER\ReportArchive"),
                 (Base::ProgramData, r"Microsoft\Windows\WER\ReportQueue"),
             ]),
-            min_age: None,
         },
     },
-    Target {
-        id: "directx-shader-cache",
-        name: "DirectX shader cache",
-        category: Category::Windows,
-        default_selected: false,
+    Recipe {
+        target: Metadata {
+            id: "directx-shader-cache",
+            name: "DirectX shader cache",
+            category: "Windows",
+            default_selected: false,
+            min_age: None,
+        },
         content: Content::Folders {
             folders: Folders::Trees(&[(Base::LocalAppData, "D3DSCache")]),
-            min_age: None,
         },
     },
-    Target {
-        id: "chrome-cache",
-        name: "Chrome cache",
-        category: Category::Browsers,
-        default_selected: true,
+    Recipe {
+        target: Metadata {
+            id: "chrome-cache",
+            name: "Chrome cache",
+            category: "Browsers",
+            default_selected: true,
+            min_age: None,
+        },
         content: Content::Folders {
             folders: Folders::Profiles {
                 base: Base::LocalAppData,
                 path: r"Google\Chrome\User Data",
                 caches: &["Cache", "Code Cache", "GPUCache"],
             },
-            min_age: None,
         },
     },
-    Target {
-        id: "pnpm-store",
-        name: "pnpm store",
-        category: Category::Developer,
-        default_selected: false,
+    Recipe {
+        target: Metadata {
+            id: "pnpm-store",
+            name: "pnpm store",
+            category: "Developer",
+            default_selected: false,
+            min_age: None,
+        },
         content: Content::Folders {
             folders: Folders::Trees(&[(Base::LocalAppData, r"pnpm\store")]),
-            min_age: None,
         },
     },
-    Target {
-        id: "pip-cache",
-        name: "pip cache",
-        category: Category::Developer,
-        default_selected: false,
+    Recipe {
+        target: Metadata {
+            id: "pip-cache",
+            name: "pip cache",
+            category: "Developer",
+            default_selected: false,
+            min_age: None,
+        },
         content: Content::Folders {
             folders: Folders::Trees(&[(Base::LocalAppData, r"pip\cache")]),
-            min_age: None,
         },
     },
-    Target {
-        id: "go-build-cache",
-        name: "Go build cache",
-        category: Category::Developer,
-        default_selected: false,
+    Recipe {
+        target: Metadata {
+            id: "go-build-cache",
+            name: "Go build cache",
+            category: "Developer",
+            default_selected: false,
+            min_age: None,
+        },
         content: Content::Folders {
             folders: Folders::Trees(&[(Base::LocalAppData, "go-build")]),
-            min_age: None,
         },
     },
 ];
@@ -238,7 +242,11 @@ mod tests {
     #[test]
     fn target_ids_are_unique() {
         for (ix, target) in TARGETS.iter().enumerate() {
-            assert!(TARGETS[ix + 1..].iter().all(|other| other.id != target.id));
+            assert!(
+                TARGETS[ix + 1..]
+                    .iter()
+                    .all(|other| other.target.id != target.target.id)
+            );
         }
     }
 }

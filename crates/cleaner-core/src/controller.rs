@@ -3,11 +3,11 @@
 //! the UI. Workers receive `Command`s and report back through `apply`; the
 //! Selection store receives `Choices` and reports back through `save_finished`.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
-use crate::results::{CleanResult, Drive, Event, ScanResult};
+use crate::results::{CleanResult, Event, ScanResult};
 use crate::selection::{self, Choices, Loaded};
-use crate::targets::{TARGETS, Target, TargetId};
+use crate::targets::{Target, TargetId};
 
 /// Identifies one Scan or Clean, so late reports from an earlier one are ignored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -15,19 +15,25 @@ pub struct OpId(u64);
 
 /// Work the controller asks a worker to do.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Command {
+pub enum Command<Snapshot> {
     Scan {
         op: OpId,
         targets: Vec<TargetId>,
     },
     Clean {
         op: OpId,
-        targets: Vec<TargetId>,
-        /// The drives whose Recycle Bins the latest Scan covered.
-        drives: Vec<Drive>,
+        targets: Vec<CleanTarget<Snapshot>>,
     },
     /// Ask the worker running `op` to stop between filesystem steps or shell calls.
     Stop(OpId),
+}
+
+/// A ready Target paired with the evidence from its latest Scan.
+/// Only the native implementation interprets the snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CleanTarget<Snapshot> {
+    pub id: TargetId,
+    pub snapshot: Snapshot,
 }
 
 /// The operation in progress. At most one runs at a time.
@@ -77,14 +83,14 @@ struct PendingSave {
     initial: bool,
 }
 
-pub struct Controller {
+pub struct Controller<Snapshot> {
     rows: Vec<Row>,
     operation: Operation,
     next_op: u64,
     /// Targets captured by a Clean request that waits for the Scan worker to stop.
     pending_clean: Option<Vec<TargetId>>,
-    /// The drives whose Recycle Bins the current or latest Scan covered.
-    recycle_bin_drives: Vec<Drive>,
+    /// Native evidence is tied to a Target and accepted only from the current Scan.
+    snapshots: BTreeMap<TargetId, Snapshot>,
     /// The Target the running Scan is inspecting.
     scanning_target: Option<TargetId>,
     /// Results reported so far by the running Clean.
@@ -99,11 +105,13 @@ pub struct Controller {
     closing: bool,
 }
 
-impl Controller {
+impl<Snapshot: Clone> Controller<Snapshot> {
     /// Starts with nothing selected; the Selection arrives through `load_selection`.
-    pub fn new() -> Self {
-        let rows = TARGETS
-            .iter()
+    /// The native catalog supplies unique, stable IDs in checklist order. Worker
+    /// reports and user actions must name only Targets from that catalog.
+    pub fn new(targets: impl IntoIterator<Item = &'static Target>) -> Self {
+        let rows = targets
+            .into_iter()
             .map(|target| Row {
                 target,
                 selected: false,
@@ -117,7 +125,7 @@ impl Controller {
             operation: Operation::Idle,
             next_op: 0,
             pending_clean: None,
-            recycle_bin_drives: Vec::new(),
+            snapshots: BTreeMap::new(),
             scanning_target: None,
             clean_results: Vec::new(),
             last_clean: None,
@@ -135,13 +143,13 @@ impl Controller {
     }
 
     /// Starts a Scan of every Target, selected ones first.
-    pub fn start_scan(&mut self) -> Option<Command> {
+    pub fn start_scan(&mut self) -> Option<Command<Snapshot>> {
         if !self.can_scan() {
             return None;
         }
         let op = self.begin_op();
         self.operation = Operation::Scanning(op);
-        self.recycle_bin_drives.clear();
+        self.snapshots.clear();
         for row in &mut self.rows {
             let estimate = row.scan.take();
             // A cleaned Target's estimate no longer describes its contents.
@@ -194,21 +202,17 @@ impl Controller {
     }
 
     /// Applies a worker report. Reports from any operation but the current one are ignored.
-    pub fn apply(&mut self, op: OpId, event: Event) -> Option<Command> {
+    pub fn apply(&mut self, op: OpId, event: Event<Snapshot>) -> Option<Command<Snapshot>> {
         match (self.operation, event) {
             (Operation::Scanning(current), Event::Scanning(id)) if current == op => {
                 self.scanning_target = Some(id);
                 None
             }
-            (Operation::Scanning(current), Event::Scanned(id, result)) if current == op => {
-                self.set_scan(id, result);
-                None
-            }
-            (Operation::Scanning(current), Event::RecycleBinScanned(id, result, drives))
+            (Operation::Scanning(current), Event::Scanned(id, result, snapshot))
                 if current == op =>
             {
                 self.set_scan(id, result);
-                self.recycle_bin_drives = drives;
+                self.snapshots.insert(id, snapshot);
                 None
             }
             (Operation::Scanning(current), Event::Finished) if current == op => {
@@ -267,7 +271,7 @@ impl Controller {
     }
 
     /// Captures the ready Selection and starts a Clean, stopping an unfinished Scan first.
-    pub fn request_clean(&mut self) -> Option<Command> {
+    pub fn request_clean(&mut self) -> Option<Command<Snapshot>> {
         if !self.can_clean() {
             return None;
         }
@@ -314,7 +318,10 @@ impl Controller {
                 self.saved_choices = Some(choices);
             }
             Err(error) => {
-                self.replace_selection(&selection::choices(|_| false));
+                self.replace_selection(&selection::choices(
+                    self.rows.iter().map(|row| row.target),
+                    |_| false,
+                ));
                 self.selection_error = Some(format!("Selection could not be loaded: {error}"));
             }
         }
@@ -354,10 +361,9 @@ impl Controller {
             Err(error) => {
                 self.selection_error = Some(format!("Selection could not be saved: {error}"));
                 if self.pending_saves.is_empty() && !pending.initial {
-                    let restored = self
-                        .saved_choices
-                        .clone()
-                        .unwrap_or_else(|| selection::choices(|_| false));
+                    let restored = self.saved_choices.clone().unwrap_or_else(|| {
+                        selection::choices(self.rows.iter().map(|row| row.target), |_| false)
+                    });
                     self.replace_selection(&restored);
                 }
             }
@@ -373,7 +379,7 @@ impl Controller {
     }
 
     /// Stop the worker and suppress a pending Clean or automatic rescan.
-    pub fn close(&mut self) -> Option<Command> {
+    pub fn close(&mut self) -> Option<Command<Snapshot>> {
         self.closing = true;
         self.pending_clean = None;
         match self.operation {
@@ -410,9 +416,8 @@ impl Controller {
         choices
     }
 
-    /// A Recycle Bin in `targets` has a complete result from the latest Scan, so
-    /// `recycle_bin_drives` still holds the drives that Scan covered.
-    fn begin_clean(&mut self, targets: Vec<TargetId>) -> Command {
+    /// Every requested Target has a complete current result and its native snapshot.
+    fn begin_clean(&mut self, targets: Vec<TargetId>) -> Command<Snapshot> {
         let op = self.begin_op();
         self.operation = Operation::Cleaning(op);
         for &id in &targets {
@@ -420,8 +425,17 @@ impl Controller {
         }
         Command::Clean {
             op,
-            targets,
-            drives: self.recycle_bin_drives.clone(),
+            targets: targets
+                .into_iter()
+                .map(|id| CleanTarget {
+                    id,
+                    snapshot: self
+                        .snapshots
+                        .get(&id)
+                        .expect("ready Targets have a current Scan snapshot")
+                        .clone(),
+                })
+                .collect(),
         }
     }
 
@@ -451,20 +465,59 @@ mod tests {
     use super::*;
     use crate::results::{CleanStatus, Problem};
 
+    type Controller = super::Controller<Vec<u64>>;
+    type Command = super::Command<Vec<u64>>;
+    type Event = crate::results::Event<Vec<u64>>;
+
+    static TARGETS: [Target; 4] = [
+        Target {
+            id: "cache",
+            name: "Cache",
+            category: "System",
+            default_selected: true,
+            min_age: None,
+        },
+        Target {
+            id: "temp",
+            name: "Temp",
+            category: "System",
+            default_selected: true,
+            min_age: None,
+        },
+        Target {
+            id: "discarded",
+            name: "Discarded",
+            category: "System",
+            default_selected: true,
+            min_age: None,
+        },
+        Target {
+            id: "build",
+            name: "Build cache",
+            category: "Developer",
+            default_selected: false,
+            min_age: None,
+        },
+    ];
+
+    fn scanned(id: TargetId, result: ScanResult) -> Event {
+        Event::Scanned(id, result, vec![])
+    }
+
     /// A controller whose stored Selection is already loaded and saved.
     fn loaded(pick: impl Fn(&Target) -> bool) -> Controller {
-        let mut controller = Controller::new();
+        let mut controller = Controller::new(&TARGETS);
         let save = controller.load_selection(Ok(Loaded {
-            choices: selection::choices(pick),
+            choices: selection::choices(&TARGETS, pick),
             needs_save: false,
         }));
         assert_eq!(save, None);
         controller
     }
 
-    /// Picks only the two temp Targets, so tests can finish a Scan with two reports.
+    /// Picks only two fixture Targets, so tests can finish a Scan with two reports.
     fn temps(target: &Target) -> bool {
-        matches!(target.id, "user-temp" | "windows-temp")
+        matches!(target.id, "cache" | "temp")
     }
 
     fn cleaned(deleted_bytes: u64) -> CleanResult {
@@ -473,13 +526,6 @@ mod tests {
             deleted_bytes: Some(deleted_bytes),
             skipped: vec![],
             coverage_problem: None,
-        }
-    }
-
-    fn drive(letter: char) -> Drive {
-        Drive {
-            letter,
-            volume: format!("volume {letter}"),
         }
     }
 
@@ -492,16 +538,16 @@ mod tests {
 
     #[test]
     fn selected_targets_scan_first_and_incomplete_results_block_clean() {
-        let mut controller = loaded(|target| target.id == "windows-temp");
+        let mut controller = loaded(|target| target.id == "temp");
         let Command::Scan { op, targets } = controller.start_scan().unwrap() else {
             unreachable!()
         };
-        assert_eq!(targets[..2], ["windows-temp", "user-temp"]);
+        assert_eq!(targets[..2], ["temp", "cache"]);
         assert_eq!(targets.len(), TARGETS.len());
         controller.apply(
             op,
-            Event::Scanned(
-                "windows-temp",
+            scanned(
+                "temp",
                 ScanResult::Partial {
                     bytes: 5,
                     problem: Problem::AccessDenied,
@@ -511,8 +557,8 @@ mod tests {
         assert!(!controller.can_clean());
         controller.apply(op, Event::Finished);
         assert!(!controller.can_clean());
-        assert!(controller.toggle("windows-temp").is_some());
-        assert!(controller.toggle("user-temp").is_some());
+        assert!(controller.toggle("temp").is_some());
+        assert!(controller.toggle("cache").is_some());
         controller.save_finished(Ok(()));
         controller.save_finished(Ok(()));
         assert!(
@@ -523,22 +569,25 @@ mod tests {
 
     #[test]
     fn clean_waits_for_unfinished_unticked_scan_then_rescans() {
-        let mut controller = loaded(|target| target.id == "user-temp");
+        let mut controller = loaded(|target| target.id == "cache");
         let scan = scan_op(&mut controller);
-        controller.apply(
-            scan,
-            Event::Scanned("user-temp", ScanResult::Complete { bytes: 10 }),
-        );
+        controller.apply(scan, scanned("cache", ScanResult::Complete { bytes: 10 }));
         assert!(controller.can_clean());
         assert_eq!(controller.request_clean(), Some(Command::Stop(scan)));
-        assert!(controller.toggle("windows-temp").is_none());
+        assert!(controller.toggle("temp").is_none());
         assert_eq!(controller.request_clean(), None);
         let Some(Command::Clean { op, targets, .. }) = controller.apply(scan, Event::Finished)
         else {
             panic!("expected Clean")
         };
-        assert_eq!(targets, ["user-temp"]);
-        controller.apply(op, Event::Cleaned("user-temp", cleaned(10)));
+        assert_eq!(
+            targets,
+            [CleanTarget {
+                id: "cache",
+                snapshot: vec![]
+            }]
+        );
+        controller.apply(op, Event::Cleaned("cache", cleaned(10)));
         assert!(matches!(
             controller.apply(op, Event::Finished),
             Some(Command::Scan { .. })
@@ -547,63 +596,68 @@ mod tests {
     }
 
     #[test]
-    fn clean_empties_only_the_drives_the_latest_scan_covered() {
-        let mut controller = loaded(|target| target.id == "recycle-bin");
-        let scan = scan_op(&mut controller);
-        let empty_bin = ScanResult::Complete { bytes: 0 };
+    fn clean_receives_only_selected_snapshots_from_the_latest_scan() {
+        let mut controller = loaded(|target| target.id == "discarded");
+        let first = scan_op(&mut controller);
         controller.apply(
-            scan,
-            Event::RecycleBinScanned(
-                "recycle-bin",
-                empty_bin.clone(),
-                vec![drive('C'), drive('D')],
-            ),
+            first,
+            Event::Scanned("discarded", ScanResult::Complete { bytes: 0 }, vec![1, 2]),
         );
-        assert_eq!(controller.request_clean(), Some(Command::Stop(scan)));
-        let Some(Command::Clean {
-            op,
-            targets,
-            drives,
-        }) = controller.apply(scan, Event::Finished)
-        else {
+        assert_eq!(controller.request_clean(), Some(Command::Stop(first)));
+        let Some(Command::Clean { op, targets }) = controller.apply(first, Event::Finished) else {
             panic!("expected Clean")
         };
         assert_eq!(
-            (targets, drives),
-            (vec!["recycle-bin"], vec![drive('C'), drive('D')])
+            targets,
+            [CleanTarget {
+                id: "discarded",
+                snapshot: vec![1, 2]
+            }]
         );
-        controller.apply(op, Event::Cleaned("recycle-bin", cleaned(0)));
-        let Some(Command::Scan { op: rescan, .. }) = controller.apply(op, Event::Finished) else {
+        controller.apply(op, Event::Cleaned("discarded", cleaned(0)));
+        let Some(Command::Scan { op: latest, .. }) = controller.apply(op, Event::Finished) else {
             panic!("expected rescan")
         };
-        controller.apply(
-            rescan,
-            Event::RecycleBinScanned("recycle-bin", empty_bin, vec![drive('C')]),
+        assert!(
+            !controller.can_clean(),
+            "old snapshots cannot make a new Scan ready"
         );
-        controller.apply(rescan, Event::Finished);
-        let Some(Command::Clean { drives, .. }) = controller.request_clean() else {
+        controller.apply(
+            latest,
+            Event::Scanned("discarded", ScanResult::Complete { bytes: 0 }, vec![3]),
+        );
+        controller.apply(
+            latest,
+            Event::Scanned("cache", ScanResult::Complete { bytes: 9 }, vec![4]),
+        );
+        controller.apply(
+            first,
+            Event::Scanned("discarded", ScanResult::Complete { bytes: 0 }, vec![99]),
+        );
+        controller.apply(latest, Event::Finished);
+        let Some(Command::Clean { targets, .. }) = controller.request_clean() else {
             panic!("expected Clean")
         };
-        assert_eq!(drives, [drive('C')]);
+        assert_eq!(
+            targets,
+            [CleanTarget {
+                id: "discarded",
+                snapshot: vec![3]
+            }]
+        );
     }
 
     #[test]
     fn rescan_shows_previous_estimates_until_each_target_reports() {
-        let mut controller = loaded(|target| target.id == "user-temp");
+        let mut controller = loaded(|target| target.id == "cache");
         let scan = scan_op(&mut controller);
-        controller.apply(
-            scan,
-            Event::Scanned("user-temp", ScanResult::Complete { bytes: 4 }),
-        );
-        controller.apply(
-            scan,
-            Event::Scanned("windows-temp", ScanResult::Complete { bytes: 9 }),
-        );
+        controller.apply(scan, scanned("cache", ScanResult::Complete { bytes: 4 }));
+        controller.apply(scan, scanned("temp", ScanResult::Complete { bytes: 9 }));
         controller.apply(scan, Event::Finished);
         let Some(Command::Clean { op, .. }) = controller.request_clean() else {
             panic!("expected Clean")
         };
-        controller.apply(op, Event::Cleaned("user-temp", cleaned(4)));
+        controller.apply(op, Event::Cleaned("cache", cleaned(4)));
         let Some(Command::Scan { op: rescan, .. }) = controller.apply(op, Event::Finished) else {
             panic!("expected rescan")
         };
@@ -613,41 +667,32 @@ mod tests {
             (row.scan.clone(), row.previous.clone())
         };
         // A cleaned Target's old estimate is obsolete; others stay shown but unused.
-        assert_eq!(row(&controller, "user-temp"), (None, None));
+        assert_eq!(row(&controller, "cache"), (None, None));
         let nine = Some(ScanResult::Complete { bytes: 9 });
-        assert_eq!(row(&controller, "windows-temp"), (None, nine.clone()));
+        assert_eq!(row(&controller, "temp"), (None, nine.clone()));
         assert_eq!(controller.totals().complete_bytes, 0);
 
-        controller.apply(rescan, Event::Scanning("user-temp"));
-        assert_eq!(controller.scanning_target(), Some("user-temp"));
-        controller.apply(
-            rescan,
-            Event::Scanned("user-temp", ScanResult::Complete { bytes: 0 }),
-        );
+        controller.apply(rescan, Event::Scanning("cache"));
+        assert_eq!(controller.scanning_target(), Some("cache"));
+        controller.apply(rescan, scanned("cache", ScanResult::Complete { bytes: 0 }));
         assert_eq!(controller.scanning_target(), None);
         assert!(
             controller.can_clean(),
             "only current results decide readiness"
         );
-        assert_eq!(row(&controller, "windows-temp"), (None, nine));
-        controller.apply(
-            rescan,
-            Event::Scanned("windows-temp", ScanResult::Complete { bytes: 2 }),
-        );
+        assert_eq!(row(&controller, "temp"), (None, nine));
+        controller.apply(rescan, scanned("temp", ScanResult::Complete { bytes: 2 }));
         let two = Some(ScanResult::Complete { bytes: 2 });
-        assert_eq!(row(&controller, "windows-temp"), (two, None));
+        assert_eq!(row(&controller, "temp"), (two, None));
     }
 
     #[test]
     fn unsaved_selection_blocks_clean_and_close_suppresses_rescan() {
         let mut controller = loaded(temps);
         let scan = scan_op(&mut controller);
-        controller.apply(
-            scan,
-            Event::Scanned("user-temp", ScanResult::Complete { bytes: 2 }),
-        );
-        controller.apply(scan, Event::Scanned("windows-temp", ScanResult::NotPresent));
-        assert!(controller.toggle("windows-temp").is_some());
+        controller.apply(scan, scanned("cache", ScanResult::Complete { bytes: 2 }));
+        controller.apply(scan, scanned("temp", ScanResult::NotPresent));
+        assert!(controller.toggle("temp").is_some());
         assert!(!controller.can_clean(), "an unsaved Selection blocks Clean");
         controller.save_finished(Ok(()));
         assert!(controller.can_clean());
@@ -656,7 +701,7 @@ mod tests {
             panic!("expected Clean")
         };
         assert_eq!(controller.close(), Some(Command::Stop(op)));
-        assert!(controller.toggle("user-temp").is_none());
+        assert!(controller.toggle("cache").is_none());
         assert_eq!(controller.apply(op, Event::Finished), None);
         assert!(controller.ready_to_exit());
     }
@@ -667,10 +712,7 @@ mod tests {
         let first = scan_op(&mut controller);
         controller.apply(first, Event::Finished);
         let second = scan_op(&mut controller);
-        controller.apply(
-            first,
-            Event::Scanned("user-temp", ScanResult::Complete { bytes: 99 }),
-        );
+        controller.apply(first, scanned("cache", ScanResult::Complete { bytes: 99 }));
         assert!(controller.rows()[0].scan.is_none());
         assert_ne!(first, second);
     }
@@ -680,18 +722,21 @@ mod tests {
         let mut controller = loaded(temps);
         let scan = scan_op(&mut controller);
         assert!(controller.start_scan().is_none());
-        controller.apply(
-            scan,
-            Event::Scanned("user-temp", ScanResult::Complete { bytes: 2 }),
-        );
-        controller.apply(scan, Event::Scanned("windows-temp", ScanResult::NotPresent));
+        controller.apply(scan, scanned("cache", ScanResult::Complete { bytes: 2 }));
+        controller.apply(scan, scanned("temp", ScanResult::NotPresent));
         assert_eq!(controller.request_clean(), Some(Command::Stop(scan)));
         assert_eq!(controller.request_clean(), None);
         let Some(Command::Clean { op, targets, .. }) = controller.apply(scan, Event::Finished)
         else {
             panic!("expected Clean after Scan completion")
         };
-        assert_eq!(targets, ["user-temp"]);
+        assert_eq!(
+            targets,
+            [CleanTarget {
+                id: "cache",
+                snapshot: vec![]
+            }]
+        );
         assert!(controller.start_scan().is_none());
         assert_eq!(controller.request_clean(), None);
         controller.apply(op, Event::Finished);
@@ -701,11 +746,8 @@ mod tests {
     fn close_during_scan_cancels_pending_clean_after_worker_acknowledges_stop() {
         let mut controller = loaded(temps);
         let scan = scan_op(&mut controller);
-        controller.apply(
-            scan,
-            Event::Scanned("user-temp", ScanResult::Complete { bytes: 2 }),
-        );
-        controller.apply(scan, Event::Scanned("windows-temp", ScanResult::NotPresent));
+        controller.apply(scan, scanned("cache", ScanResult::Complete { bytes: 2 }));
+        controller.apply(scan, scanned("temp", ScanResult::NotPresent));
         assert_eq!(controller.request_clean(), Some(Command::Stop(scan)));
         assert_eq!(controller.close(), Some(Command::Stop(scan)));
         assert_eq!(controller.apply(scan, Event::Finished), None);
@@ -718,28 +760,28 @@ mod tests {
     fn finished_clean_results_follow_worker_order_and_survive_rescan() {
         let mut controller = loaded(temps);
         let scan = scan_op(&mut controller);
-        for id in ["user-temp", "windows-temp"] {
-            controller.apply(scan, Event::Scanned(id, ScanResult::Complete { bytes: 1 }));
+        for id in ["cache", "temp"] {
+            controller.apply(scan, scanned(id, ScanResult::Complete { bytes: 1 }));
         }
         controller.apply(scan, Event::Finished);
         let Some(Command::Clean { op, .. }) = controller.request_clean() else {
             panic!("expected Clean")
         };
-        controller.apply(op, Event::Cleaned("windows-temp", cleaned(2)));
-        controller.apply(op, Event::Cleaned("user-temp", cleaned(1)));
+        controller.apply(op, Event::Cleaned("temp", cleaned(2)));
+        controller.apply(op, Event::Cleaned("cache", cleaned(1)));
         let Some(Command::Scan { op: rescan, .. }) = controller.apply(op, Event::Finished) else {
             panic!("expected rescan")
         };
         assert_eq!(controller.last_clean(), Some(&[cleaned(2), cleaned(1)][..]));
-        controller.apply(rescan, Event::Scanned("user-temp", ScanResult::NotPresent));
+        controller.apply(rescan, scanned("cache", ScanResult::NotPresent));
         assert_eq!(controller.last_clean().unwrap().len(), 2);
     }
 
     #[test]
     fn selection_is_locked_until_loaded() {
-        let mut controller = Controller::new();
+        let mut controller = Controller::new(&TARGETS);
         assert_eq!(controller.start_scan(), None);
-        assert!(controller.toggle("user-temp").is_none());
+        assert!(controller.toggle("cache").is_none());
         controller.load_selection(Err("unreadable".into()));
         assert!(controller.rows().iter().all(|row| !row.selected));
         assert!(controller.start_scan().is_some());
@@ -748,7 +790,7 @@ mod tests {
     #[test]
     fn failed_save_restores_the_last_stored_selection() {
         let mut controller = loaded(temps);
-        assert!(controller.toggle("user-temp").is_some());
+        assert!(controller.toggle("cache").is_some());
         controller.save_finished(Err("disk full".into()));
         assert!(controller.rows()[0].selected);
         assert_eq!(
@@ -759,18 +801,15 @@ mod tests {
 
     #[test]
     fn failed_initial_save_keeps_clean_disabled() {
-        let mut controller = Controller::new();
+        let mut controller = Controller::new(&TARGETS);
         let save = controller.load_selection(Ok(Loaded {
-            choices: selection::defaults(),
+            choices: selection::defaults(&TARGETS),
             needs_save: true,
         }));
-        assert_eq!(save, Some(selection::defaults()));
+        assert_eq!(save, Some(selection::defaults(&TARGETS)));
         let scan = scan_op(&mut controller);
-        controller.apply(
-            scan,
-            Event::Scanned("user-temp", ScanResult::Complete { bytes: 2 }),
-        );
-        controller.apply(scan, Event::Scanned("windows-temp", ScanResult::NotPresent));
+        controller.apply(scan, scanned("cache", ScanResult::Complete { bytes: 2 }));
+        controller.apply(scan, scanned("temp", ScanResult::NotPresent));
         controller.save_finished(Err("access denied".into()));
         assert!(
             controller.rows()[0].selected,

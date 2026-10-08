@@ -2,7 +2,20 @@
 
 use std::io;
 
-use crate::results::{CleanResult, CleanStatus, Problem, add_count};
+use cleaner_core::results::{CleanResult, CleanStatus, Problem, add_count};
+
+/// Native wording for the shared reasons a Target could not be inspected or cleaned.
+pub fn problem_text(problem: Problem) -> &'static str {
+    match problem {
+        Problem::AccessDenied => "access denied",
+        Problem::SharingViolation => "sharing violation",
+        Problem::Redirected => "redirected folder skipped",
+        Problem::Metadata => "metadata unavailable",
+        Problem::NonLocal => "network location skipped",
+        Problem::LocationChanged => "drive changed since Scan",
+        Problem::Other => "I/O error",
+    }
+}
 
 /// An I/O error as shown to the user: Windows' own message, without the
 /// `(os error N)` suffix std appends.
@@ -71,14 +84,14 @@ pub fn clean_summary(results: &[CleanResult]) -> String {
         parts.push(format!(
             "{} skipped ({})",
             plural(count, "file"),
-            problem.text()
+            problem_text(problem)
         ));
     }
     for (problem, count) in incomplete {
         parts.push(format!(
             "{} incomplete ({})",
             plural(count, "Target"),
-            problem.text()
+            problem_text(problem)
         ));
     }
     if stopped > 0 {

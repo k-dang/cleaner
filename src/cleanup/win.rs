@@ -31,7 +31,7 @@ use windows::Win32::System::WindowsProgramming::DRIVE_FIXED;
 use windows::Win32::UI::Shell::{KF_FLAG_DONT_VERIFY, SHGetKnownFolderPath};
 use windows::core::{GUID, HSTRING, PWSTR};
 
-use crate::results::Problem;
+use cleaner_core::results::Problem;
 
 pub(super) struct OwnedHandle(pub(super) HANDLE);
 
