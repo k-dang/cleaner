@@ -910,7 +910,7 @@ impl CleanerView {
             )
     }
 
-    /// The line under the checklist: handoff and Clean progress, then the last result.
+    /// The line under the checklist: startup, errors, Clean progress, or the last result.
     fn status_line(&self) -> Option<StatusLine> {
         if self.controller.is_closing() {
             return Some(StatusLine::info("Stopping…"));
@@ -924,9 +924,6 @@ impl CleanerView {
         let rows = self.controller.rows();
         if self.controller.selection_locked() {
             let queued = rows.iter().filter(|r| r.clean.is_some()).count();
-            if queued == 0 {
-                return Some(StatusLine::info("Stopping the Scan to start Clean…"));
-            }
             let done = rows
                 .iter()
                 .filter(|r| matches!(r.clean, Some(CleanProgress::Done(_))))
@@ -1294,49 +1291,111 @@ fn focus_ring(t: &Theme, inset: Pixels, radius: Pixels) -> Div {
 mod tests {
     use super::*;
     use crate::targets::TARGETS;
+    use gpui::{AppContext, TestAppContext, WindowHandle};
+
+    /// A rendered checklist with fixture reports and no filesystem or save workers.
+    fn fixture_window(app: &mut TestAppContext, text_scale: f32) -> WindowHandle<CleanerView> {
+        app.open_window(BASE_SIZE, |_, cx| {
+            let mut controller = Controller::new(targets::catalog());
+            controller.load_selection(Ok(selection::Loaded {
+                choices: selection::defaults(targets::catalog()),
+                needs_save: false,
+            }));
+            let (save_tx, _) = std::sync::mpsc::channel();
+            CleanerView {
+                row_focus: controller
+                    .rows()
+                    .iter()
+                    .map(|_| cx.focus_handle())
+                    .collect(),
+                controller,
+                save_tx,
+                worker: None,
+                system: System {
+                    text_scale,
+                    animations: false,
+                    ..System::read()
+                },
+                root_focus: cx.focus_handle(),
+                scan_focus: cx.focus_handle(),
+                clean_focus: cx.focus_handle(),
+                row_children: Rc::default(),
+                list: ScrollHandle::new(),
+                thumb_drag: None,
+                _watcher: None,
+                _subscriptions: Vec::new(),
+            }
+        })
+    }
+
+    fn draw(app: &mut TestAppContext, window: WindowHandle<CleanerView>) {
+        app.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+    }
+
+    #[test]
+    fn clean_enters_tab_order_only_after_scan_finishes() {
+        let mut app = TestAppContext::single();
+        let window = fixture_window(&mut app, 1.);
+        let scan = window
+            .update(&mut app, |view, _, cx| {
+                view.controller.load_selection(Ok(selection::Loaded {
+                    choices: selection::choices(targets::catalog(), |target| {
+                        target.id == "user-temp"
+                    }),
+                    needs_save: false,
+                }));
+                let Some(Command::Scan { op, .. }) = view.controller.start_scan() else {
+                    panic!("expected Scan")
+                };
+                view.controller.apply(
+                    op,
+                    Event::Scanned(
+                        "user-temp",
+                        ScanResult::Complete { bytes: 10 },
+                        Snapshot::Folders,
+                    ),
+                );
+                cx.notify();
+                op
+            })
+            .unwrap();
+        draw(&mut app, window);
+        window
+            .update(&mut app, |view, window, cx| {
+                window.focus(view.row_focus.last().unwrap(), cx);
+                window.focus_next(cx);
+                assert!(
+                    view.row_focus[0].is_focused(window),
+                    "disabled Clean is skipped"
+                );
+                assert!(!view.controller.selection_locked());
+                assert_eq!(view.controller.request_clean(), None);
+                assert!(view.status_line().is_none());
+                assert_eq!(view.controller.apply(scan, Event::Finished), None);
+                cx.notify();
+            })
+            .unwrap();
+        draw(&mut app, window);
+        window
+            .update(&mut app, |view, window, cx| {
+                window.focus(view.row_focus.last().unwrap(), cx);
+                window.focus_next(cx);
+                assert!(
+                    view.clean_focus.is_focused(window),
+                    "ready Clean can receive keyboard focus"
+                );
+                assert!(view.controller.can_clean());
+                assert!(view.status_line().is_none());
+            })
+            .unwrap();
+    }
 
     #[test]
     fn status_changes_preserve_checklist_bounds_and_scroll_position() {
-        use gpui::{AppContext, TestAppContext, WindowHandle};
-
-        fn draw(app: &mut TestAppContext, window: WindowHandle<CleanerView>) {
-            app.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
-                .unwrap();
-        }
-
         for text_scale in [1., 2.25] {
             let mut app = TestAppContext::single();
-            let window = app.open_window(BASE_SIZE, |_, cx| {
-                let mut controller = Controller::new(targets::catalog());
-                controller.load_selection(Ok(selection::Loaded {
-                    choices: selection::defaults(targets::catalog()),
-                    needs_save: false,
-                }));
-                let (save_tx, _) = std::sync::mpsc::channel();
-                CleanerView {
-                    row_focus: controller
-                        .rows()
-                        .iter()
-                        .map(|_| cx.focus_handle())
-                        .collect(),
-                    controller,
-                    save_tx,
-                    worker: None,
-                    system: System {
-                        text_scale,
-                        animations: false,
-                        ..System::read()
-                    },
-                    root_focus: cx.focus_handle(),
-                    scan_focus: cx.focus_handle(),
-                    clean_focus: cx.focus_handle(),
-                    row_children: Rc::default(),
-                    list: ScrollHandle::new(),
-                    thumb_drag: None,
-                    _watcher: None,
-                    _subscriptions: Vec::new(),
-                }
-            });
+            let window = fixture_window(&mut app, text_scale);
             draw(&mut app, window);
             window
                 .update(&mut app, |view, _, cx| {

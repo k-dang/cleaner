@@ -20,7 +20,7 @@ The download link becomes available when the first stable release is published.
   <img src="docs/images/scanning.png" alt="Cleaner window mid-Scan, with some rows still scanning and one Target reporting an incomplete result" width="420">
 </p>
 
-Rows update while the Scan runs. A Target that could not be fully inspected shows the reason, such as *Access denied*, and blocks Clean until you untick it or rescan. Clean stays available while unticked Targets are still scanning.
+Rows update while the Scan runs, and you can change the Selection as results arrive. Clean stays disabled until the entire Scan finishes. A selected Target that could not be fully inspected shows the reason, such as *Access denied*, and blocks Clean until you untick it or rescan. Incomplete results for unticked Targets do not block Clean after Scan finishes.
 
 See [`CONTEXT.md`](CONTEXT.md) for the domain terms (Target, Minimum age, Selection, Scan, Clean).
 
@@ -131,6 +131,6 @@ The workflow uses GitHub's built-in token and needs no additional secrets.
 Run both scripts from an elevated PowerShell session, because the app runs elevated.
 
 - `scripts/dump-uia.ps1` prints the window's UI Automation tree: control names, roles, and checked and disabled states. Use `-Toggle <name>` or `-Invoke <name>` to act on a control first.
-- `scripts/trace-network.ps1 -Exe <path> -Dir <output folder>` traces launch, the displayed User temp and Windows temp checkbox changes (restoring the original Selection), a manual Scan, and close. The app must own 0 network events, and a successful curl positive control must own network events. The report excludes Clean, the Scan-to-Clean handoff, and the automatic post-Clean rescan, because the script exercises only non-destructive controls.
+- `scripts/trace-network.ps1 -Exe <path> -Dir <output folder>` traces launch, the displayed User temp and Windows temp checkbox changes (restoring the original Selection), a manual Scan, and close. The app must own 0 network events, and a successful curl positive control must own network events. The report excludes Clean and the automatic post-Clean rescan, because the script exercises only non-destructive controls.
 
 `scripts/owner-checks` holds the owner-behavior checks used to admit or exclude Targets. They damage scratch caches and a scratch browser profile, never the real ones, and need network access.
