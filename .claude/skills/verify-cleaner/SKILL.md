@@ -9,6 +9,10 @@ Cleaner is a single-window Windows app with no CLI, HTTP, or test-only hooks. Yo
 
 Read [`features/README.md`](features/README.md) before driving anything, then use the matching feature file as the recipe.
 
+## Not on Windows?
+
+The app builds and runs only on Windows 11, so nothing here can be driven on macOS or Linux. Verify what is portable there: `cargo test -p cleaner-core --locked` and `cargo clippy -p cleaner-core --all-targets --locked -- -D warnings`. Report the UI as not verified ("needs a Windows run") rather than substituting core tests for it.
+
 ## Hard limits
 
 - **It acts on the real machine.** Target folders come from `SHGetKnownFolderPath`, so no env var or flag redirects them. Scan is read-only and safe. **Clean permanently deletes the user's real files.** Never invoke Clean without the user's explicit go-ahead in this conversation. Deletion logic is covered by `cargo test --workspace --locked` against temporary folders; prefer that for proving deletion behavior.
