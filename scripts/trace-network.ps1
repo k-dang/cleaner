@@ -1,5 +1,5 @@
 # Trace the supported, non-destructive UI workflow and use curl as a positive control.
-# Clean, its Scan handoff, and its automatic rescan are not verified by this script.
+# Clean and its automatic rescan are not verified by this script.
 # Run elevated: trace-network.ps1 -Exe <cc-cleaner.exe> -Dir <output folder>
 param(
     [Parameter(Mandatory)][string]$Exe,
@@ -142,4 +142,4 @@ if ($controlEvents.Count -eq 0) { throw 'No curl network events captured; the tr
 if ($appEvents.Count -ne 0) { throw "Network verification failed: Cleaner owns $($appEvents.Count) network events. Inspect $xml." }
 "PASS for exercised steps only: launch, displayed Target checkbox changes, manual Scan, and close."
 "app pid $($app.Id): 0 owned network events; curl control pid $($control.Id): $($controlEvents.Count) owned network events."
-"NOT VERIFIED: Clean, Scan-to-Clean handoff, automatic post-Clean rescan. Trace: $xml"
+"NOT VERIFIED: Clean, automatic post-Clean rescan. Trace: $xml"
