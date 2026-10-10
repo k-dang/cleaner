@@ -476,13 +476,15 @@ impl CleanerView {
                     .id("total")
                     .role(Role::Label)
                     // Labels take their accessible name from their value.
+                    // `Scanning …` already ends a sentence, so it gets no extra period.
                     .aria_value(format!(
-                        "Selected estimate: {}. {overview}. {note}",
+                        "Selected estimate: {}. {overview}{} {note}",
                         selected_estimate.as_deref().unwrap_or(if unscanned {
                             "not scanned"
                         } else {
                             "calculating"
-                        })
+                        }),
+                        if overview.ends_with('…') { "" } else { "." }
                     ))
                     .flex()
                     .flex_col()
