@@ -92,9 +92,8 @@ pub struct Controller<Snapshot> {
     clean_results: Vec<CleanResult>,
     last_clean: Option<Vec<CleanResult>>,
     selection_loaded: bool,
-    /// At most one save is handed to the store at a time.
     pending_save: Option<PendingSave>,
-    /// Later edits are already reflected in the rows; save them after this write.
+    /// Edits made during a save are already reflected in the rows.
     save_again: bool,
     /// The latest Selection known to be stored.
     saved_choices: Option<Choices>,

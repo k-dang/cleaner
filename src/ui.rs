@@ -342,14 +342,11 @@ impl CleanerView {
         }
     }
 
-    /// Hands the current save to the store, or finishes it as failed if it stopped.
-    fn send_save(&mut self, mut save: Option<Choices>) {
-        while let Some(choices) = save {
-            if self.save_tx.send(choices).is_ok() {
-                break;
-            }
-            save = self
-                .controller
+    fn send_save(&mut self, save: Option<Choices>) {
+        if let Some(choices) = save
+            && self.save_tx.send(choices).is_err()
+        {
+            self.controller
                 .save_finished(Err("the save worker stopped".into()));
         }
     }

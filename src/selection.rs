@@ -30,8 +30,7 @@ pub struct SelectionStore {
 }
 
 impl SelectionStore {
-    /// Loads and saves off the UI thread. The controller sends at most one save
-    /// at a time and starts the next only after receiving its completion.
+    /// Loads and saves Selection on a background thread.
     pub fn start_worker() -> (Sender<Choices>, UnboundedReceiver<SelectionEvent>) {
         let (save_tx, save_rx) = std::sync::mpsc::channel::<Choices>();
         let (event_tx, events) = futures::channel::mpsc::unbounded();
@@ -41,24 +40,14 @@ impl SelectionStore {
                 .as_ref()
                 .map_err(Clone::clone)
                 .and_then(|store| store.load().map_err(|error| crate::format::error(&error)));
-            if event_tx
-                .unbounded_send(SelectionEvent::Loaded(loaded))
-                .is_err()
-            {
-                return;
-            }
+            event_tx.unbounded_send(SelectionEvent::Loaded(loaded)).ok();
             for choices in save_rx {
                 let result = store.as_ref().map_err(Clone::clone).and_then(|store| {
                     store
                         .save(&choices)
                         .map_err(|error| crate::format::error(&error))
                 });
-                if event_tx
-                    .unbounded_send(SelectionEvent::Saved(result))
-                    .is_err()
-                {
-                    break;
-                }
+                event_tx.unbounded_send(SelectionEvent::Saved(result)).ok();
             }
         });
         (save_tx, events)
