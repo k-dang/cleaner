@@ -632,13 +632,10 @@ impl CleanerView {
         let focus = &self.row_focus[ix];
         let ring = !locked && shows_focus(focus, window);
         let id = row.target.id;
-        let mut spoken = match &status.detail {
+        let spoken = match &status.detail {
             Some(detail) => format!("{}. {detail}", status.value),
             None => status.value.clone(),
         };
-        if status.updating {
-            spoken.push_str(". Updating");
-        }
 
         div()
             .id(("row", ix))
@@ -812,7 +809,7 @@ impl CleanerView {
         let t = self.system.theme;
         let totals = self.controller.totals();
         let enabled = self.controller.can_clean();
-        // The header's estimate, so the label stays put while a Scan updates it.
+        // Use the same current Scan estimate as the header.
         let label = match selected_estimate(self.controller.rows(), totals.scanning).bytes {
             Some(bytes) if bytes > 0 => format!("Clean approximately {}", format::size(bytes)),
             _ => "Clean".to_string(),
@@ -1052,14 +1049,12 @@ impl Render for CleanerView {
 }
 
 fn is_hidden(row: &Row) -> bool {
-    row.scan.as_ref().or(row.previous.as_ref()) == Some(&ScanResult::NotPresent)
-        && row.clean.is_none()
+    row.scan == Some(ScanResult::NotPresent) && row.clean.is_none()
 }
 
-/// True until the first Scan reports a result.
+/// True when the Scan has no results yet.
 fn never_scanned(rows: &[Row]) -> bool {
-    rows.iter()
-        .all(|row| row.scan.is_none() && row.previous.is_none())
+    rows.iter().all(|row| row.scan.is_none())
 }
 
 /// Counts the checked rows currently shown in the checklist. An absent Target
@@ -1072,22 +1067,20 @@ fn visible_selection_count(rows: &[Row]) -> usize {
 
 /// The selected estimate shown in the header and on the Clean button.
 struct SelectedEstimate {
-    /// `None` while a Scan has not reported any selected size yet.
+    /// `None` while a running Scan has no complete selected estimate yet.
     bytes: Option<u64>,
     /// A Scan has not yet reported every selected Target.
     pending: bool,
 }
 
-/// Includes previous results still shown while a Scan runs.
+/// Includes only complete estimates reported by the current Scan.
 fn selected_estimate(rows: &[Row], scanning: bool) -> SelectedEstimate {
     let mut bytes = 0;
     let mut known = false;
     let mut pending = false;
     for row in rows.iter().filter(|row| row.selected && !is_hidden(row)) {
         pending |= row.scan.is_none();
-        if let Some(ScanResult::Complete { bytes: size }) =
-            row.scan.as_ref().or(row.previous.as_ref())
-        {
+        if let Some(ScanResult::Complete { bytes: size }) = row.scan {
             bytes += size;
             known = true;
         }
@@ -1141,13 +1134,11 @@ struct RowStatus {
     icon: Option<(&'static str, Hsla)>,
     detail: Option<String>,
     detail_color: Hsla,
-    /// The value is from the previous Scan and is being replaced.
-    updating: bool,
 }
 
 /// What a row shows on the right, and the optional explanation under its name.
-/// During a Scan, a row not yet reached shows its previous result dimmed, or
-/// `Waiting`; the `active` row is the one being scanned.
+/// During a Scan, a row not yet reached shows `Waiting`; the `active` row is the
+/// one being scanned. Clean results stay shown until fresh Scan results arrive.
 fn row_status(row: &Row, scanning: bool, active: bool, t: &Theme) -> RowStatus {
     let mut s = RowStatus {
         value: String::new(),
@@ -1155,17 +1146,15 @@ fn row_status(row: &Row, scanning: bool, active: bool, t: &Theme) -> RowStatus {
         icon: None,
         detail: None,
         detail_color: t.text_secondary,
-        updating: false,
     };
-    let previous = row.scan.is_none() && row.previous.is_some();
     let blocked = |detail: String| {
-        if row.selected && !previous {
+        if row.selected {
             format!("{detail} · Untick or rescan to Clean")
         } else {
             detail
         }
     };
-    match (&row.clean, row.scan.as_ref().or(row.previous.as_ref())) {
+    match (&row.clean, &row.scan) {
         (Some(CleanProgress::Queued), _) => s.value = "Queued".into(),
         (Some(CleanProgress::Cleaning), _) => {
             s.value = "Cleaning…".into();
@@ -1243,13 +1232,6 @@ fn row_status(row: &Row, scanning: bool, active: bool, t: &Theme) -> RowStatus {
             s.value = "Not scanned".into();
             s.detail = Some(blocked("Scan stopped".into()));
         }
-    }
-    if previous {
-        s.value_color = t.text_disabled;
-        s.icon = s.icon.map(|(glyph, _)| (glyph, t.text_disabled));
-        // Keep the detail line so the row keeps its height while it updates.
-        s.detail_color = t.text_disabled;
-        s.updating = true;
     }
     s
 }
@@ -1472,26 +1454,30 @@ mod tests {
     }
 
     #[test]
-    fn rescan_estimate_keeps_previous_sizes_until_scanned() {
+    fn selected_estimate_tracks_current_scan_progress() {
         let mut rows: Vec<Row> = targets::catalog()
             .map(|target| Row {
                 target,
                 selected: matches!(target.id, "user-temp" | "windows-temp"),
                 scan: None,
-                previous: None,
                 clean: None,
             })
             .collect();
         let estimate = selected_estimate(&rows, true);
         assert_eq!((estimate.bytes, estimate.pending), (None, true));
-        rows[0].previous = Some(ScanResult::Complete { bytes: 4 });
         rows[1].scan = Some(ScanResult::Complete { bytes: 5 });
         let estimate = selected_estimate(&rows, true);
-        assert_eq!((estimate.bytes, estimate.pending), (Some(9), true));
+        assert_eq!((estimate.bytes, estimate.pending), (Some(5), true));
         rows[0].scan = Some(ScanResult::Complete { bytes: 1 });
-        rows[0].previous = None;
         let estimate = selected_estimate(&rows, true);
         assert_eq!((estimate.bytes, estimate.pending), (Some(6), false));
+
+        rows[0].scan = Some(ScanResult::Partial {
+            bytes: 10,
+            problem: cleaner_core::results::Problem::AccessDenied,
+        });
+        let estimate = selected_estimate(&rows, false);
+        assert_eq!((estimate.bytes, estimate.pending), (Some(5), false));
     }
 
     #[test]
@@ -1504,7 +1490,6 @@ mod tests {
                     "chrome-cache" | "directx-shader-cache" => ScanResult::NotPresent,
                     _ => ScanResult::Complete { bytes: 1 },
                 }),
-                previous: None,
                 clean: None,
             })
             .collect();

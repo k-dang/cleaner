@@ -20,7 +20,7 @@ The download link becomes available when the first stable release is published.
   <img src="docs/images/scanning.png" alt="Cleaner window mid-Scan, with some rows still scanning and one Target reporting an incomplete result" width="420">
 </p>
 
-Rows update while the Scan runs, and you can change the Selection as results arrive. Clean stays disabled until the entire Scan finishes. A selected Target that could not be fully inspected shows the reason, such as *Access denied*, and blocks Clean until you untick it or rescan. Incomplete results for unticked Targets do not block Clean after Scan finishes.
+Rows update while the Scan runs, and you can change the Selection as results arrive. Each Scan clears the old estimates; the header and Clean button include only complete estimates from that Scan. Clean stays disabled until the entire Scan finishes. A selected Target that could not be fully inspected shows the reason, such as *Access denied*, and blocks Clean until you untick it or rescan. Incomplete results for unticked Targets do not block Clean after Scan finishes.
 
 See [`CONTEXT.md`](CONTEXT.md) for the domain terms (Target, Minimum age, Selection, Scan, Clean).
 
