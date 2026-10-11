@@ -34,11 +34,11 @@ use cleaner_core::controller::{CleanProgress, OpId, Row};
 use crate::cleanup::recycle_bin::SystemShell;
 use crate::cleanup::{self, Event, Roots, Snapshot};
 use crate::format;
-use crate::selection::SelectionStore;
+use crate::selection::{SelectionEvent, SelectionStore};
 use crate::targets::{self, CATEGORIES};
 use crate::theme::{self, System, Theme};
 use cleaner_core::results::{CleanStatus, ScanResult};
-use cleaner_core::selection::{self, Choices};
+use cleaner_core::selection::Choices;
 use cleaner_core::targets::TargetId;
 
 type Controller = cleaner_core::controller::Controller<Snapshot>;
@@ -140,11 +140,6 @@ struct Worker {
     stop: Arc<AtomicBool>,
 }
 
-enum SelectionEvent {
-    Loaded(Result<selection::Loaded, String>),
-    Saved(Result<(), String>),
-}
-
 pub struct CleanerView {
     controller: Controller,
     save_tx: Sender<Choices>,
@@ -178,27 +173,7 @@ impl CleanerView {
         })
         .detach();
 
-        let (save_tx, save_rx) = std::sync::mpsc::channel::<Choices>();
-        let (selection_tx, mut selection_rx) = futures::channel::mpsc::unbounded();
-        std::thread::spawn(move || {
-            let store = SelectionStore::system().map_err(|error| format::error(&error));
-            let loaded = store
-                .as_ref()
-                .map_err(Clone::clone)
-                .and_then(|store| store.load().map_err(|error| format::error(&error)));
-            selection_tx
-                .unbounded_send(SelectionEvent::Loaded(loaded))
-                .ok();
-            for choices in save_rx {
-                let result = store
-                    .as_ref()
-                    .map_err(Clone::clone)
-                    .and_then(|store| store.save(&choices).map_err(|error| format::error(&error)));
-                selection_tx
-                    .unbounded_send(SelectionEvent::Saved(result))
-                    .ok();
-            }
-        });
+        let (save_tx, mut selection_rx) = SelectionStore::start_worker();
         cx.spawn(async move |this, cx| {
             while let Some(event) = selection_rx.next().await {
                 if this
@@ -356,35 +331,33 @@ impl CleanerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match event {
-            SelectionEvent::Loaded(loaded) => {
-                let save = self.controller.load_selection(loaded);
-                self.send_save(save);
-            }
+        let save = match event {
+            SelectionEvent::Loaded(loaded) => self.controller.load_selection(loaded),
             SelectionEvent::Saved(result) => self.controller.save_finished(result),
-        }
+        };
+        self.send_save(save);
         cx.notify();
         if self.controller.ready_to_exit() {
             window.remove_window();
         }
     }
 
-    /// Hands Choices the controller queued to the Selection store thread.
-    fn send_save(&mut self, choices: Option<Choices>) {
-        if let Some(choices) = choices
-            && self.save_tx.send(choices).is_err()
-        {
-            self.controller
+    /// Hands the current save to the store, or finishes it as failed if it stopped.
+    fn send_save(&mut self, mut save: Option<Choices>) {
+        while let Some(choices) = save {
+            if self.save_tx.send(choices).is_ok() {
+                break;
+            }
+            save = self
+                .controller
                 .save_finished(Err("the save worker stopped".into()));
         }
     }
 
     fn toggle(&mut self, id: TargetId, cx: &mut Context<Self>) {
         let save = self.controller.toggle(id);
-        if save.is_some() {
-            self.send_save(save);
-            cx.notify();
-        }
+        self.send_save(save);
+        cx.notify();
     }
 
     fn request_close(&mut self, cx: &mut Context<Self>) -> bool {
@@ -1275,6 +1248,7 @@ fn focus_ring(t: &Theme, inset: Pixels, radius: Pixels) -> Div {
 mod tests {
     use super::*;
     use crate::targets::TARGETS;
+    use cleaner_core::selection;
     use gpui::{AppContext, TestAppContext, WindowHandle};
 
     /// A rendered checklist with fixture reports and no filesystem or save workers.
@@ -1314,6 +1288,62 @@ mod tests {
 
     fn draw(app: &mut TestAppContext, window: WindowHandle<CleanerView>) {
         app.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+    }
+
+    #[test]
+    fn selection_completion_sends_later_edits_and_a_stopped_store_rolls_back() {
+        let mut app = TestAppContext::single();
+        let window = fixture_window(&mut app, 1.);
+        let (save_tx, saves) = std::sync::mpsc::channel();
+        window
+            .update(&mut app, |view, _, cx| {
+                view.save_tx = save_tx;
+                view.toggle("user-temp", cx);
+                view.toggle("pip-cache", cx);
+                view.toggle("go-build-cache", cx);
+            })
+            .unwrap();
+        let first = saves.try_recv().unwrap();
+        assert!(!first["user-temp"]);
+        assert!(!first["pip-cache"]);
+        assert!(saves.try_recv().is_err(), "only one save may be in flight");
+        window
+            .update(&mut app, |view, window, cx| {
+                view.apply_selection(SelectionEvent::Saved(Ok(())), window, cx);
+            })
+            .unwrap();
+        let latest = saves.try_recv().unwrap();
+        assert!(!latest["user-temp"]);
+        assert!(latest["pip-cache"]);
+        assert!(latest["go-build-cache"]);
+        window
+            .update(&mut app, |view, window, cx| {
+                view.apply_selection(SelectionEvent::Saved(Ok(())), window, cx);
+                assert!(view.controller.selection_error().is_none());
+            })
+            .unwrap();
+        drop(saves);
+        window
+            .update(&mut app, |view, _, cx| {
+                view.toggle("pip-cache", cx);
+                assert!(
+                    view.controller
+                        .rows()
+                        .iter()
+                        .find(|row| row.target.id == "pip-cache")
+                        .unwrap()
+                        .selected
+                );
+                assert_eq!(
+                    view.controller.selection_error(),
+                    Some("Selection could not be saved: the save worker stopped")
+                );
+                assert!(
+                    view.request_close(cx),
+                    "a failed send cannot leave a save pending"
+                );
+            })
             .unwrap();
     }
 

@@ -13,7 +13,7 @@ The download link becomes available when the first stable release is published.
 ## How it works
 
 1. **Scan.** Click **Scan**. The app Scans every Target and fills in each row as it finishes, starting with the ticked ones. The header shows the estimated size of the Selection.
-2. **Review.** Tick or untick Targets. The app saves each change right away. Developer caches and the DirectX shader cache start unticked because rebuilding them costs time or downloads.
+2. **Review.** Tick or untick Targets. The app saves your latest Selection right away. Developer caches and the DirectX shader cache start unticked because rebuilding them costs time or downloads.
 3. **Clean.** Click **Clean approximately …**. The checklist is the confirmation. Deletion is permanent, and the app reports what it deleted, what it skipped, and why. It then Scans again.
 
 <p align="center">
