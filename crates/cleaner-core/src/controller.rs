@@ -3,7 +3,7 @@
 //! the UI. Workers receive `Command`s and report back through `apply`; the
 //! Selection store receives `Choices` and reports back through `save_finished`.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 
 use crate::results::{CleanResult, Event, ScanResult};
 use crate::selection::{self, Choices, Loaded};
@@ -92,8 +92,9 @@ pub struct Controller<Snapshot> {
     clean_results: Vec<CleanResult>,
     last_clean: Option<Vec<CleanResult>>,
     selection_loaded: bool,
-    /// Saves in request order; the store reports them in the same order.
-    pending_saves: VecDeque<PendingSave>,
+    pending_save: Option<PendingSave>,
+    /// Edits made during a save are already reflected in the rows.
+    save_again: bool,
     /// The latest Selection known to be stored.
     saved_choices: Option<Choices>,
     selection_error: Option<String>,
@@ -123,7 +124,8 @@ impl<Snapshot: Clone> Controller<Snapshot> {
             clean_results: Vec::new(),
             last_clean: None,
             selection_loaded: false,
-            pending_saves: VecDeque::new(),
+            pending_save: None,
+            save_again: false,
             saved_choices: None,
             selection_error: None,
             closing: false,
@@ -240,7 +242,7 @@ impl<Snapshot: Clone> Controller<Snapshot> {
     /// True when idle, the Selection is saved and unlocked, every selected,
     /// present Target has a complete estimate, and at least one exists.
     pub fn can_clean(&self) -> bool {
-        let saved = self.pending_saves.is_empty() && self.saved_choices.is_some();
+        let saved = self.pending_save.is_none() && self.saved_choices.is_some();
         if self.operation != Operation::Idle || self.selection_locked() || !saved {
             return false;
         }
@@ -289,7 +291,7 @@ impl<Snapshot: Clone> Controller<Snapshot> {
             }) => {
                 self.replace_selection(&choices);
                 if needs_save {
-                    return Some(self.queue_save(choices, true));
+                    return Some(self.begin_save(choices, true));
                 }
                 self.saved_choices = Some(choices);
             }
@@ -304,39 +306,38 @@ impl<Snapshot: Clone> Controller<Snapshot> {
         None
     }
 
-    /// Flips a Target's selection and returns the Choices to save. Rejected while
-    /// the Selection is locked.
+    /// Flips a Target unless the Selection is locked. Starts saving immediately,
+    /// or leaves the latest choices in the rows until the current save finishes.
     pub fn toggle(&mut self, id: TargetId) -> Option<Choices> {
         if self.selection_locked() {
             return None;
         }
         let row = self.row_mut(id);
         row.selected = !row.selected;
-        let choices = self
-            .rows
-            .iter()
-            .map(|row| (row.target.id.to_string(), row.selected))
-            .collect();
-        Some(self.queue_save(choices, false))
+        if self.pending_save.is_some() {
+            self.save_again = true;
+            return None;
+        }
+        Some(self.begin_save(self.choices(), false))
     }
 
-    /// Applies the store's report for the oldest pending save. When the last user
-    /// change fails, the Selection returns to the latest stored one.
-    pub fn save_finished(&mut self, result: Result<(), String>) {
+    /// Finishes the current save and starts one for any later edits. When the
+    /// last user change fails, the Selection returns to the latest stored one.
+    pub fn save_finished(&mut self, result: Result<(), String>) -> Option<Choices> {
         let pending = self
-            .pending_saves
-            .pop_front()
-            .expect("every reported save was queued");
+            .pending_save
+            .take()
+            .expect("every reported save was started");
         match result {
             Ok(()) => {
                 self.saved_choices = Some(pending.choices);
-                if self.pending_saves.is_empty() {
+                if !self.save_again {
                     self.selection_error = None;
                 }
             }
             Err(error) => {
                 self.selection_error = Some(format!("Selection could not be saved: {error}"));
-                if self.pending_saves.is_empty() && !pending.initial {
+                if !self.save_again && !pending.initial {
                     let restored = self.saved_choices.clone().unwrap_or_else(|| {
                         selection::choices(self.rows.iter().map(|row| row.target), |_| false)
                     });
@@ -344,6 +345,10 @@ impl<Snapshot: Clone> Controller<Snapshot> {
                 }
             }
         }
+        if std::mem::take(&mut self.save_again) {
+            return Some(self.begin_save(self.choices(), false));
+        }
+        None
     }
 
     pub fn selection_error(&self) -> Option<&str> {
@@ -367,9 +372,12 @@ impl<Snapshot: Clone> Controller<Snapshot> {
         self.closing
     }
 
-    /// True once closing and no worker or save is still running.
+    /// True once closing, Selection loading is finished, and no worker or save runs.
     pub fn ready_to_exit(&self) -> bool {
-        self.closing && self.operation == Operation::Idle && self.pending_saves.is_empty()
+        self.closing
+            && self.selection_loaded
+            && self.operation == Operation::Idle
+            && self.pending_save.is_none()
     }
 
     /// Per-Target results of the latest finished Clean, in Clean order.
@@ -383,8 +391,15 @@ impl<Snapshot: Clone> Controller<Snapshot> {
         }
     }
 
-    fn queue_save(&mut self, choices: Choices, initial: bool) -> Choices {
-        self.pending_saves.push_back(PendingSave {
+    fn choices(&self) -> Choices {
+        self.rows
+            .iter()
+            .map(|row| (row.target.id.to_string(), row.selected))
+            .collect()
+    }
+
+    fn begin_save(&mut self, choices: Choices, initial: bool) -> Choices {
+        self.pending_save = Some(PendingSave {
             choices: choices.clone(),
             initial,
         });
@@ -532,8 +547,8 @@ mod tests {
         controller.apply(op, Event::Finished);
         assert!(!controller.can_clean());
         assert!(controller.toggle("temp").is_some());
-        assert!(controller.toggle("cache").is_some());
-        controller.save_finished(Ok(()));
+        assert!(controller.toggle("cache").is_none());
+        assert!(controller.save_finished(Ok(())).is_some());
         controller.save_finished(Ok(()));
         assert!(
             !controller.can_clean(),
@@ -824,6 +839,114 @@ mod tests {
             controller.selection_error(),
             Some("Selection could not be saved: disk full")
         );
+    }
+
+    #[test]
+    fn rapid_edits_save_the_latest_selection_and_close_waits_for_it() {
+        for first_succeeds in [false, true] {
+            for last_succeeds in [false, true] {
+                let mut controller = loaded(temps);
+                let original = controller.choices();
+                let scan = scan_op(&mut controller);
+                for target in &TARGETS {
+                    controller.apply(scan, scanned(target.id, ScanResult::Complete { bytes: 2 }));
+                }
+                controller.apply(scan, Event::Finished);
+                assert!(controller.can_clean());
+
+                let first = controller.toggle("cache").unwrap();
+                for id in ["temp", "build", "cache"] {
+                    assert!(controller.toggle(id).is_none());
+                }
+                let latest = controller.choices();
+                assert!(latest["cache"]);
+                assert!(!latest["temp"]);
+                assert!(latest["build"]);
+                assert!(!controller.can_clean());
+                controller.close();
+                assert!(!controller.ready_to_exit());
+
+                let outcome = |success| {
+                    if success {
+                        Ok(())
+                    } else {
+                        Err("disk full".into())
+                    }
+                };
+                assert_eq!(
+                    controller.save_finished(outcome(first_succeeds)),
+                    Some(latest.clone())
+                );
+                assert_eq!(
+                    controller.choices(),
+                    latest,
+                    "a stale completion cannot undo later edits"
+                );
+                assert!(!controller.ready_to_exit());
+                assert_eq!(controller.save_finished(outcome(last_succeeds)), None);
+                assert!(controller.ready_to_exit());
+                let expected = if last_succeeds {
+                    latest
+                } else if first_succeeds {
+                    first
+                } else {
+                    original
+                };
+                assert_eq!(controller.choices(), expected);
+                assert_eq!(controller.selection_error().is_none(), last_succeeds);
+            }
+        }
+    }
+
+    #[test]
+    fn later_edits_retry_a_failed_initial_save_even_when_choices_match() {
+        let mut controller = Controller::new(&TARGETS);
+        let initial = controller
+            .load_selection(Ok(Loaded {
+                choices: selection::defaults(&TARGETS),
+                needs_save: true,
+            }))
+            .unwrap();
+        assert!(controller.toggle("cache").is_none());
+        assert!(controller.toggle("cache").is_none());
+        assert_eq!(controller.choices(), initial);
+        assert_eq!(
+            controller.save_finished(Err("access denied".into())),
+            Some(initial.clone())
+        );
+        assert_eq!(controller.choices(), initial);
+        assert_eq!(controller.save_finished(Ok(())), None);
+        assert!(controller.selection_error().is_none());
+        let scan = scan_op(&mut controller);
+        for target in &TARGETS {
+            controller.apply(scan, scanned(target.id, ScanResult::Complete { bytes: 2 }));
+        }
+        controller.apply(scan, Event::Finished);
+        assert!(controller.can_clean());
+    }
+
+    #[test]
+    fn close_during_selection_load_waits_for_any_initial_save() {
+        let mut controller = Controller::new(&TARGETS);
+        controller.close();
+        assert!(!controller.ready_to_exit());
+        assert!(
+            controller
+                .load_selection(Ok(Loaded {
+                    choices: selection::defaults(&TARGETS),
+                    needs_save: true,
+                }))
+                .is_some()
+        );
+        assert!(!controller.ready_to_exit());
+        assert_eq!(controller.save_finished(Ok(())), None);
+        assert!(controller.ready_to_exit());
+
+        let mut unreadable = Controller::new(&TARGETS);
+        unreadable.close();
+        assert!(!unreadable.ready_to_exit());
+        assert_eq!(unreadable.load_selection(Err("unreadable".into())), None);
+        assert!(unreadable.ready_to_exit());
     }
 
     #[test]

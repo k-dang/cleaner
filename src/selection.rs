@@ -5,6 +5,9 @@ use std::io::{self, Read, Write};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::Sender;
+
+use futures::channel::mpsc::UnboundedReceiver;
 
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
@@ -17,11 +20,39 @@ use cleaner_core::selection::{self, Choices, Loaded};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
+pub enum SelectionEvent {
+    Loaded(Result<Loaded, String>),
+    Saved(Result<(), String>),
+}
+
 pub struct SelectionStore {
     path: PathBuf,
 }
 
 impl SelectionStore {
+    /// Loads and saves Selection on a background thread.
+    pub fn start_worker() -> (Sender<Choices>, UnboundedReceiver<SelectionEvent>) {
+        let (save_tx, save_rx) = std::sync::mpsc::channel::<Choices>();
+        let (event_tx, events) = futures::channel::mpsc::unbounded();
+        std::thread::spawn(move || {
+            let store = Self::system().map_err(|error| crate::format::error(&error));
+            let loaded = store
+                .as_ref()
+                .map_err(Clone::clone)
+                .and_then(|store| store.load().map_err(|error| crate::format::error(&error)));
+            event_tx.unbounded_send(SelectionEvent::Loaded(loaded)).ok();
+            for choices in save_rx {
+                let result = store.as_ref().map_err(Clone::clone).and_then(|store| {
+                    store
+                        .save(&choices)
+                        .map_err(|error| crate::format::error(&error))
+                });
+                event_tx.unbounded_send(SelectionEvent::Saved(result)).ok();
+            }
+        });
+        (save_tx, events)
+    }
+
     pub fn system() -> io::Result<Self> {
         Self::resolve(crate::cleanup::validated_known_folder)
     }
