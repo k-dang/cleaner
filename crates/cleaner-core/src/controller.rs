@@ -50,9 +50,6 @@ pub struct Row {
     pub selected: bool,
     /// This Target's result from the current or latest Scan; `None` until it reports.
     pub scan: Option<ScanResult>,
-    /// The previous Scan's result, shown until the current Scan reports this
-    /// Target. It never counts toward totals or Clean readiness.
-    pub previous: Option<ScanResult>,
     pub clean: Option<CleanProgress>,
 }
 
@@ -114,7 +111,6 @@ impl<Snapshot: Clone> Controller<Snapshot> {
                 target,
                 selected: false,
                 scan: None,
-                previous: None,
                 clean: None,
             })
             .collect();
@@ -148,12 +144,7 @@ impl<Snapshot: Clone> Controller<Snapshot> {
         self.operation = Operation::Scanning(op);
         self.snapshots.clear();
         for row in &mut self.rows {
-            let estimate = row.scan.take();
-            // A cleaned Target's estimate no longer describes its contents.
-            row.previous = match row.clean {
-                Some(CleanProgress::Done(_)) => None,
-                _ => estimate,
-            };
+            row.scan = None;
         }
         let (selected, rest): (Vec<&Row>, Vec<&Row>) =
             self.rows.iter().partition(|row| row.selected);
@@ -215,7 +206,6 @@ impl<Snapshot: Clone> Controller<Snapshot> {
             (Operation::Scanning(current), Event::Finished) if current == op => {
                 for row in &mut self.rows {
                     row.scan.get_or_insert(ScanResult::Stopped);
-                    row.previous = None;
                 }
                 self.scanning_target = None;
                 self.operation = Operation::Idle;
@@ -428,7 +418,6 @@ impl<Snapshot: Clone> Controller<Snapshot> {
         self.scanning_target = None;
         let row = self.row_mut(id);
         row.scan = Some(result);
-        row.previous = None;
         row.clean = None;
     }
 
@@ -672,45 +661,56 @@ mod tests {
     }
 
     #[test]
-    fn rescan_shows_previous_estimates_until_each_target_reports() {
-        let mut controller = loaded(|target| target.id == "cache");
-        let scan = scan_op(&mut controller);
-        controller.apply(scan, scanned("cache", ScanResult::Complete { bytes: 4 }));
-        controller.apply(scan, scanned("temp", ScanResult::Complete { bytes: 9 }));
-        controller.apply(scan, Event::Finished);
-        let Some(Command::Clean { op, .. }) = controller.request_clean() else {
-            panic!("expected Clean")
-        };
-        controller.apply(op, Event::Cleaned("cache", cleaned(4)));
-        let Some(Command::Scan { op: rescan, .. }) = controller.apply(op, Event::Finished) else {
-            panic!("expected rescan")
-        };
-        let row = |controller: &Controller, id| {
-            let row = controller.rows().iter().find(|row| row.target.id == id);
-            let row = row.unwrap();
-            (row.scan.clone(), row.previous.clone())
-        };
-        // A cleaned Target's old estimate is obsolete; others stay shown but unused.
-        assert_eq!(row(&controller, "cache"), (None, None));
-        let nine = Some(ScanResult::Complete { bytes: 9 });
-        assert_eq!(row(&controller, "temp"), (None, nine.clone()));
-        assert_eq!(controller.totals().complete_bytes, 0);
+    fn manual_and_post_clean_rescans_estimate_only_current_reports() {
+        for clean_first in [false, true] {
+            let mut controller = loaded(temps);
+            let scan = scan_op(&mut controller);
+            controller.apply(scan, scanned("cache", ScanResult::Complete { bytes: 4 }));
+            controller.apply(scan, scanned("temp", ScanResult::Complete { bytes: 9 }));
+            controller.apply(scan, Event::Finished);
+            assert_eq!(controller.totals().selected_bytes, 13);
 
-        controller.apply(rescan, Event::Scanning("cache"));
-        assert_eq!(controller.scanning_target(), Some("cache"));
-        controller.apply(rescan, scanned("cache", ScanResult::Complete { bytes: 0 }));
-        assert_eq!(controller.scanning_target(), None);
-        assert!(
-            !controller.can_clean(),
-            "the automatic Scan is still running"
-        );
-        assert_eq!(controller.request_clean(), None);
-        assert_eq!(row(&controller, "temp"), (None, nine));
-        controller.apply(rescan, scanned("temp", ScanResult::Complete { bytes: 2 }));
-        let two = Some(ScanResult::Complete { bytes: 2 });
-        assert_eq!(row(&controller, "temp"), (two, None));
-        assert_eq!(controller.apply(rescan, Event::Finished), None);
-        assert!(controller.can_clean());
+            let rescan = if clean_first {
+                let Some(Command::Clean { op, .. }) = controller.request_clean() else {
+                    panic!("expected Clean")
+                };
+                controller.apply(op, Event::Cleaned("cache", cleaned(4)));
+                controller.apply(op, Event::Cleaned("temp", cleaned(9)));
+                let Some(Command::Scan { op, .. }) = controller.apply(op, Event::Finished) else {
+                    panic!("expected rescan")
+                };
+                op
+            } else {
+                scan_op(&mut controller)
+            };
+            assert!(controller.rows().iter().all(|row| row.scan.is_none()));
+            assert_eq!(controller.totals().complete_bytes, 0);
+            assert_eq!(controller.totals().selected_bytes, 0);
+
+            controller.apply(rescan, Event::Scanning("cache"));
+            assert_eq!(controller.scanning_target(), Some("cache"));
+            controller.apply(rescan, scanned("cache", ScanResult::Complete { bytes: 1 }));
+            assert_eq!(controller.scanning_target(), None);
+            assert_eq!(controller.totals().complete_bytes, 1);
+            assert_eq!(controller.totals().selected_bytes, 1);
+            assert!(
+                controller
+                    .rows()
+                    .iter()
+                    .find(|row| row.target.id == "temp")
+                    .unwrap()
+                    .scan
+                    .is_none()
+            );
+            assert!(!controller.can_clean(), "the Scan is still running");
+            assert_eq!(controller.request_clean(), None);
+
+            controller.apply(rescan, scanned("temp", ScanResult::Complete { bytes: 2 }));
+            assert_eq!(controller.totals().complete_bytes, 3);
+            assert_eq!(controller.totals().selected_bytes, 3);
+            assert_eq!(controller.apply(rescan, Event::Finished), None);
+            assert!(controller.can_clean());
+        }
     }
 
     #[test]
