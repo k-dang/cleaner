@@ -29,9 +29,9 @@ V="powershell -NoProfile -ExecutionPolicy Bypass -File .claude/skills/verify-cle
 $V launch                      # start target\debug\cc-cleaner.exe, back up Selection, wait until idle
 $V doctor                      # read-only health check of the recorded instance
 $V tree [-Out tree.txt]        # print the UIA tree with row statuses; -Out saves it in the run folder
-$V toggle "User temp"          # flip a Target checkbox and wait for the Selection save
+$V toggle "User temp"          # flip a Target checkbox; confirm persistence on disk separately
 $V invoke Scan                 # press a button by accessible name ('*' allowed: "Clean approximately*")
-$V wait-scan                   # wait until Scan is enabled and no Selection load/save is pending
+$V wait-scan                   # wait until Scan is enabled and the Selection has loaded
 $V wait-name "Deleted*"        # wait until a control with this name ('*' allowed) exists
 $V shot scan-done.png          # PNG of the window into the run folder (works even when covered)
 $V stop                        # close our instance, restore Selection, keep evidence
@@ -63,7 +63,7 @@ Stable handles are accessible names from `src/ui.rs`:
 | Category heading | Text | `Windows`, `Browsers`, `Developer` |
 | Header summary | Text | `Selected estimate: <size>. <overview>. <n> Targets selected · <scan note>` |
 | Clean button | Button | `Clean` or `Clean approximately <size>`; disabled until the full Scan completes |
-| Status line | StatusBar | Empty when idle; otherwise `Loading Selection…`, `Saving Selection…`, Selection errors, `Cleaning… x of y Targets finished`, or the Clean summary |
+| Status line | StatusBar | Empty when idle; otherwise `Loading Selection…`, `Stopping…`, Selection errors, `Cleaning… x of y Targets finished`, or the Clean summary |
 
 Use `$V tree` to read state. Each row's `desc="..."` is its status, read from UIA FullDescription: `Not scanned`, `Waiting`, `Scanning…`, a size such as `15 GB`, or `88 MB (incomplete). Access denied`. Prefer UIA patterns (Toggle, Invoke) over mouse clicks or keystrokes. Windows blocks a background script from taking focus, so `SendKeys`-style keyboard driving is unreliable; leave keyboard checks to the user. GPUI row clicks have an explicit accessibility handler, so `toggle` is the real user path for assistive technology.
 

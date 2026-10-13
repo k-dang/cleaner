@@ -13,7 +13,7 @@ The download link becomes available when the first stable release is published.
 ## How it works
 
 1. **Scan.** Click **Scan**. The app Scans every Target and fills in each row as it finishes, starting with the ticked ones. The header shows the estimated size of the Selection.
-2. **Review.** Tick or untick Targets. The app saves your latest Selection right away. Developer caches and the DirectX shader cache start unticked because rebuilding them costs time or downloads.
+2. **Review.** Tick or untick Targets. Changes take effect immediately and are saved in order in the background. Developer caches and the DirectX shader cache start unticked because rebuilding them costs time or downloads.
 3. **Clean.** Click **Clean approximately …**. The checklist is the confirmation. Deletion is permanent, and the app reports what it deleted, what it skipped, and why. It then Scans again.
 
 <p align="center">
@@ -81,6 +81,8 @@ Releases are currently unsigned. Windows may show an unknown publisher or SmartS
 To update, close the app and replace the executable with the new download.
 
 The Selection is stored in `%APPDATA%\cc-cleaner-at-home\selection.json`. If that file is malformed or unreadable, the app starts with every Target unticked and shows the error. Nothing else is persisted.
+
+If saving fails, the app shows the error and keeps your current ticks. Clean uses the visible Selection once Scan finishes, even if those choices could not be saved for next time. Closing waits for queued writes to finish.
 
 Each release includes `cc-cleaner.exe.sha256`. To check a download, run `Get-FileHash .\cc-cleaner.exe -Algorithm SHA256` in PowerShell and compare the hash with that file.
 
