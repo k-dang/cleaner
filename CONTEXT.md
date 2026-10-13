@@ -21,7 +21,7 @@ Whether a Target is ticked when no choice has been saved for it. Targets that ar
 _Avoid_: Recommended, preset
 
 **Selection**:
-The set of Targets the user has ticked. Explicit ticks and unticks are remembered between runs, and each Clean uses the Selection captured when it starts.
+The set of Targets the user has ticked. Changes take effect immediately and are saved for future runs. A save failure is reported without changing the ticks or blocking Clean. Each Clean uses the visible Selection captured when it starts.
 _Avoid_: Profile, settings, config
 
 **Scan**:

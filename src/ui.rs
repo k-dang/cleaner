@@ -331,11 +331,13 @@ impl CleanerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let save = match event {
-            SelectionEvent::Loaded(loaded) => self.controller.load_selection(loaded),
+        match event {
+            SelectionEvent::Loaded(loaded) => {
+                let save = self.controller.load_selection(loaded);
+                self.send_save(save);
+            }
             SelectionEvent::Saved(result) => self.controller.save_finished(result),
-        };
-        self.send_save(save);
+        }
         cx.notify();
         if self.controller.ready_to_exit() {
             window.remove_window();
@@ -1289,7 +1291,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_completion_sends_later_edits_and_a_stopped_store_rolls_back() {
+    fn selection_edits_queue_in_order_and_a_stopped_store_keeps_the_ticks() {
         let mut app = TestAppContext::single();
         let window = fixture_window(&mut app, 1.);
         let (save_tx, saves) = std::sync::mpsc::channel();
@@ -1304,19 +1306,18 @@ mod tests {
         let first = saves.try_recv().unwrap();
         assert!(!first["user-temp"]);
         assert!(!first["pip-cache"]);
-        assert!(saves.try_recv().is_err(), "only one save may be in flight");
-        window
-            .update(&mut app, |view, window, cx| {
-                view.apply_selection(SelectionEvent::Saved(Ok(())), window, cx);
-            })
-            .unwrap();
+        let second = saves.try_recv().unwrap();
+        assert!(second["pip-cache"]);
+        assert!(!second["go-build-cache"]);
         let latest = saves.try_recv().unwrap();
         assert!(!latest["user-temp"]);
         assert!(latest["pip-cache"]);
         assert!(latest["go-build-cache"]);
         window
             .update(&mut app, |view, window, cx| {
-                view.apply_selection(SelectionEvent::Saved(Ok(())), window, cx);
+                for _ in 0..3 {
+                    view.apply_selection(SelectionEvent::Saved(Ok(())), window, cx);
+                }
                 assert!(view.controller.selection_error().is_none());
             })
             .unwrap();
@@ -1325,7 +1326,8 @@ mod tests {
             .update(&mut app, |view, _, cx| {
                 view.toggle("pip-cache", cx);
                 assert!(
-                    view.controller
+                    !view
+                        .controller
                         .rows()
                         .iter()
                         .find(|row| row.target.id == "pip-cache")

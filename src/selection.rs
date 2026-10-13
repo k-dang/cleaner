@@ -30,7 +30,7 @@ pub struct SelectionStore {
 }
 
 impl SelectionStore {
-    /// Loads and saves Selection on a background thread.
+    /// Loads Selection, then saves each queued change in order on one background thread.
     pub fn start_worker() -> (Sender<Choices>, UnboundedReceiver<SelectionEvent>) {
         let (save_tx, save_rx) = std::sync::mpsc::channel::<Choices>();
         let (event_tx, events) = futures::channel::mpsc::unbounded();

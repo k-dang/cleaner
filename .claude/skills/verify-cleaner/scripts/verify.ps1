@@ -112,13 +112,13 @@ function Wait-Until([string]$step, $app, [scriptblock]$ready) {
     throw "Timed out after $Timeout s during $step."
 }
 
-# Idle means the Scan button is enabled and no Selection load or save is pending.
+# Idle means the Scan button is enabled and the Selection has loaded.
 function Wait-Idle($app, $root) {
-    Wait-Until 'Scan and Selection idle' $app {
+    Wait-Until 'Scan idle and Selection loaded' $app {
         $scan = Find-Named $root 'Scan'
         $names = Get-Names $root
         $scan -and $scan.Current.IsEnabled -and
-            -not ($names -contains "Saving Selection$Ellipsis" -or $names -contains "Loading Selection$Ellipsis")
+            -not ($names -contains "Loading Selection$Ellipsis")
     }
 }
 
@@ -198,7 +198,6 @@ switch ($Command) {
         $before = $pattern.Current.ToggleState
         $pattern.Toggle()
         Wait-Until "$Name toggle" $app { $pattern.Current.ToggleState -ne $before }
-        Wait-Until 'Selection save' $app { -not ((Get-Names $root) -contains "Saving Selection$Ellipsis") }
         "$Name toggle=$($pattern.Current.ToggleState)"
     }
     'invoke' {
