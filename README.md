@@ -4,8 +4,6 @@ A small, offline Windows 11 app for reviewing and permanently deleting caches an
 
 **[Download for Windows 11 x64](https://github.com/k-dang/cleaner/releases/latest/download/cc-cleaner.exe)** · [All releases](https://github.com/k-dang/cleaner/releases)
 
-The download link becomes available when the first stable release is published.
-
 <p align="center">
   <img src="docs/images/review.png" alt="Cleaner window after a Scan, showing Targets grouped by Category with size estimates and the Clean button" width="420">
 </p>
