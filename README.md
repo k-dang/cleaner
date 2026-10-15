@@ -101,6 +101,8 @@ Building the desktop app requires Windows 11 x64 and the Rust toolchain pinned i
 
 The workspace has two packages. [`cleaner-core`](crates/cleaner-core/src/lib.rs) owns Target metadata, Selection parsing and serialization, Scan/Clean coordination, and results. The root `cc-cleaner-at-home` package owns the Windows desktop app: GPUI, startup, system appearance, durable Selection storage, the fixed Windows Target catalog, and [`cleanup`](src/cleanup.rs).
 
+The controller derives one summary for estimates, visible Selection counts, and Scan/Clean progress. The screen renders that summary through [`ui/render.rs`](src/ui/render.rs); [`ui/presentation.rs`](src/ui/presentation.rs) formats status text, [`ui/controls.rs`](src/ui/controls.rs) owns control interaction and styling, and [`ui.rs`](src/ui.rs) coordinates workers and the window lifetime. See [the reusable-control evaluation](docs/ui-controls.md) for why the current controls are retained.
+
 The controller receives a catalog from the native app. Each Scan result carries a native Scan snapshot, which the controller retains without interpreting it and passes back with that Target's Clean request. Windows folder Targets retain their handle-based cleanup procedure; the Recycle Bin snapshot retains only the volumes that Scan covered. Starting a new Scan discards the previous snapshots, and late reports cannot replace current ones.
 
 The desktop app and releases remain Windows-only. A second native app must supply its own verified Targets, equivalent deletion protections, storage, and UI. See [ADR 0001](docs/adr/0001-portable-core-and-windows-app.md) for the separation decision.

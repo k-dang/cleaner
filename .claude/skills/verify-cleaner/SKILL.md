@@ -1,6 +1,6 @@
 ---
 name: verify-cleaner
-description: Launch and drive the Cleaner Windows desktop app (cc-cleaner.exe, GPUI) through UI Automation to prove a change works the way a user sees it — Scan, Selection ticks, Clean gating, status text — and capture UIA trees and screenshots as evidence. Use after changing src/ui.rs, src/cleanup, src/selection.rs, targets, or the core controller, or whenever asked to verify, E2E test, or screenshot the app.
+description: Launch and drive the Cleaner Windows desktop app (cc-cleaner.exe, GPUI) through UI Automation to prove a change works the way a user sees it — Scan, Selection ticks, Clean gating, status text — and capture UIA trees and screenshots as evidence. Use after changing src/ui.rs or src/ui/, src/cleanup, src/selection.rs, targets, or the core controller, or whenever asked to verify, E2E test, or screenshot the app.
 ---
 
 # Verify Cleaner
@@ -54,7 +54,7 @@ Run `$V doctor` first, and again whenever anything looks off. It prints the pid 
 
 ## Drive
 
-Stable handles are accessible names from `src/ui.rs`:
+Stable handles are accessible names rendered in `src/ui/render.rs`, with status text in `src/ui/presentation.rs`:
 
 | Control | UIA type | Name |
 |---|---|---|

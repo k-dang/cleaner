@@ -53,6 +53,13 @@ pub struct Row {
     pub clean: Option<CleanProgress>,
 }
 
+impl Row {
+    /// Absent Targets leave the checklist once their previous Clean result is replaced.
+    pub fn is_visible(&self) -> bool {
+        self.scan != Some(ScanResult::NotPresent) || self.clean.is_some()
+    }
+}
+
 /// Where a Target is in the running or latest Clean.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CleanProgress {
@@ -61,16 +68,27 @@ pub enum CleanProgress {
     Done(CleanResult),
 }
 
-/// Estimates for the top summary and the Clean button.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Totals {
+/// Estimates and progress derived from the current rows in one pass.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Summary {
     /// Sum of complete estimates; partial and unknown sizes are excluded.
     pub complete_bytes: u64,
-    /// Sum of complete estimates for selected Targets.
-    pub selected_bytes: u64,
+    /// Sum of complete selected estimates; unknown while selected results are pending
+    /// and no complete selected estimate has arrived (including a complete zero).
+    pub selected_bytes: Option<u64>,
+    /// At least one visible selected Target is still waiting for its Scan result.
+    pub selected_pending: bool,
     /// Targets whose latest Scan is partial, failed, or stopped.
     pub incomplete: usize,
     pub scanning: bool,
+    /// Complete estimates larger than zero, selected or not.
+    pub found_targets: usize,
+    /// Selected Targets currently shown in the checklist.
+    pub selected_targets: usize,
+    pub scanned_targets: usize,
+    pub total_targets: usize,
+    pub cleaned_targets: usize,
+    pub clean_targets: usize,
 }
 
 pub struct Controller<Snapshot> {
@@ -150,28 +168,42 @@ impl<Snapshot: Clone> Controller<Snapshot> {
         &self.rows
     }
 
-    pub fn totals(&self) -> Totals {
-        let mut totals = Totals {
-            complete_bytes: 0,
-            selected_bytes: 0,
-            incomplete: 0,
+    pub fn summary(&self) -> Summary {
+        let mut summary = Summary {
             scanning: matches!(self.operation, Operation::Scanning(_)),
+            total_targets: self.rows.len(),
+            ..Summary::default()
         };
+        let mut selected_bytes = 0;
+        let mut selected_known = false;
         for row in &self.rows {
+            summary.scanned_targets += usize::from(row.scan.is_some());
+            summary.clean_targets += usize::from(row.clean.is_some());
+            summary.cleaned_targets +=
+                usize::from(matches!(row.clean, Some(CleanProgress::Done(_))));
+            if row.selected && row.is_visible() {
+                summary.selected_targets += 1;
+                summary.selected_pending |= row.scan.is_none();
+            }
             match row.scan {
                 Some(ScanResult::Complete { bytes }) => {
-                    totals.complete_bytes += bytes;
+                    summary.complete_bytes += bytes;
+                    summary.found_targets += usize::from(bytes > 0);
                     if row.selected {
-                        totals.selected_bytes += bytes;
+                        selected_bytes += bytes;
+                        selected_known = true;
                     }
                 }
                 Some(
                     ScanResult::Partial { .. } | ScanResult::Failed { .. } | ScanResult::Stopped,
-                ) => totals.incomplete += 1,
+                ) => summary.incomplete += 1,
                 Some(ScanResult::NotPresent) | None => {}
             }
         }
-        totals
+        summary.selected_pending &= summary.scanning;
+        summary.selected_bytes =
+            (selected_known || !summary.selected_pending).then_some(selected_bytes);
+        summary
     }
 
     /// The Target the running Scan is inspecting, if any.
@@ -407,481 +439,4 @@ impl<Snapshot: Clone> Controller<Snapshot> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::results::{CleanStatus, Problem};
-
-    type Controller = super::Controller<Vec<u64>>;
-    type Command = super::Command<Vec<u64>>;
-    type Event = crate::results::Event<Vec<u64>>;
-
-    static TARGETS: [Target; 4] = [
-        Target {
-            id: "cache",
-            name: "Cache",
-            category: "System",
-            default_selected: true,
-            min_age: None,
-        },
-        Target {
-            id: "temp",
-            name: "Temp",
-            category: "System",
-            default_selected: true,
-            min_age: None,
-        },
-        Target {
-            id: "discarded",
-            name: "Discarded",
-            category: "System",
-            default_selected: true,
-            min_age: None,
-        },
-        Target {
-            id: "build",
-            name: "Build cache",
-            category: "Developer",
-            default_selected: false,
-            min_age: None,
-        },
-    ];
-
-    fn scanned(id: TargetId, result: ScanResult) -> Event {
-        Event::Scanned(id, result, vec![])
-    }
-
-    /// A controller whose stored Selection is already loaded and saved.
-    fn loaded(pick: impl Fn(&Target) -> bool) -> Controller {
-        let mut controller = Controller::new(&TARGETS);
-        let save = controller.load_selection(Ok(Loaded {
-            choices: selection::choices(&TARGETS, pick),
-            needs_save: false,
-        }));
-        assert_eq!(save, None);
-        controller
-    }
-
-    /// Picks only two fixture Targets, so tests can finish a Scan with two reports.
-    fn temps(target: &Target) -> bool {
-        matches!(target.id, "cache" | "temp")
-    }
-
-    fn cleaned(deleted_bytes: u64) -> CleanResult {
-        CleanResult {
-            status: CleanStatus::Complete,
-            deleted_bytes: Some(deleted_bytes),
-            skipped: vec![],
-            coverage_problem: None,
-        }
-    }
-
-    fn scan_op(controller: &mut Controller) -> OpId {
-        match controller.start_scan().unwrap() {
-            Command::Scan { op, .. } => op,
-            _ => unreachable!(),
-        }
-    }
-
-    #[test]
-    fn selected_targets_scan_first_and_incomplete_results_block_clean() {
-        let mut controller = loaded(|target| target.id == "temp");
-        let Command::Scan { op, targets } = controller.start_scan().unwrap() else {
-            unreachable!()
-        };
-        assert_eq!(targets[..2], ["temp", "cache"]);
-        assert_eq!(targets.len(), TARGETS.len());
-        controller.apply(
-            op,
-            scanned(
-                "temp",
-                ScanResult::Partial {
-                    bytes: 5,
-                    problem: Problem::AccessDenied,
-                },
-            ),
-        );
-        assert!(!controller.can_clean());
-        controller.apply(op, Event::Finished);
-        assert!(!controller.can_clean());
-        assert!(controller.toggle("temp").is_some());
-        assert!(controller.toggle("cache").is_some());
-        controller.save_finished(Ok(()));
-        controller.save_finished(Ok(()));
-        assert!(
-            !controller.can_clean(),
-            "an unscanned selected Target is not ready"
-        );
-    }
-
-    #[test]
-    fn finished_scan_checks_only_selected_targets_and_requires_one_complete() {
-        let failed = ScanResult::Failed {
-            problem: Problem::AccessDenied,
-        };
-        for (selected, result, ready) in [
-            (true, ScanResult::Complete { bytes: 0 }, true),
-            (true, ScanResult::NotPresent, false),
-            (false, ScanResult::Complete { bytes: 10 }, false),
-            (true, failed.clone(), false),
-            (
-                true,
-                ScanResult::Partial {
-                    bytes: 5,
-                    problem: Problem::AccessDenied,
-                },
-                false,
-            ),
-            (true, ScanResult::Stopped, false),
-        ] {
-            let mut controller = loaded(|target| selected && target.id == "cache");
-            let scan = scan_op(&mut controller);
-            controller.apply(scan, scanned("cache", result.clone()));
-            controller.apply(scan, scanned("temp", failed.clone()));
-            controller.apply(scan, Event::Finished);
-            assert_eq!(controller.can_clean(), ready, "{selected}: {result:?}");
-            assert_eq!(controller.request_clean().is_some(), ready);
-        }
-    }
-
-    #[test]
-    fn clean_requires_a_fresh_request_after_scan_finishes_then_rescans() {
-        let mut controller = loaded(|target| target.id == "cache");
-        let scan = scan_op(&mut controller);
-        controller.apply(scan, scanned("cache", ScanResult::Complete { bytes: 10 }));
-        assert!(!controller.can_clean());
-        assert_eq!(controller.request_clean(), None);
-        assert!(!controller.selection_locked());
-        assert!(controller.toggle("temp").is_some());
-        controller.save_finished(Ok(()));
-        for id in ["temp", "discarded", "build"] {
-            controller.apply(scan, scanned(id, ScanResult::NotPresent));
-        }
-        assert!(!controller.can_clean(), "all reports still need Finished");
-        assert_eq!(controller.request_clean(), None);
-        assert_eq!(controller.apply(scan, Event::Finished), None);
-        assert!(controller.can_clean());
-        let Some(Command::Clean { op, targets }) = controller.request_clean() else {
-            panic!("expected Clean")
-        };
-        assert!(controller.toggle("temp").is_none());
-        assert_eq!(controller.request_clean(), None);
-        assert_eq!(
-            targets,
-            [CleanTarget {
-                id: "cache",
-                snapshot: vec![]
-            }]
-        );
-        controller.apply(op, Event::Cleaned("cache", cleaned(10)));
-        assert!(matches!(
-            controller.apply(op, Event::Finished),
-            Some(Command::Scan { .. })
-        ));
-        assert_eq!(controller.last_clean(), Some(&[cleaned(10)][..]));
-    }
-
-    #[test]
-    fn clean_receives_only_selected_snapshots_from_the_latest_scan() {
-        let mut controller = loaded(|target| target.id == "discarded");
-        let first = scan_op(&mut controller);
-        controller.apply(
-            first,
-            Event::Scanned("discarded", ScanResult::Complete { bytes: 0 }, vec![1, 2]),
-        );
-        controller.apply(first, Event::Finished);
-        let Some(Command::Clean { op, targets }) = controller.request_clean() else {
-            panic!("expected Clean")
-        };
-        assert_eq!(
-            targets,
-            [CleanTarget {
-                id: "discarded",
-                snapshot: vec![1, 2]
-            }]
-        );
-        controller.apply(op, Event::Cleaned("discarded", cleaned(0)));
-        let Some(Command::Scan { op: latest, .. }) = controller.apply(op, Event::Finished) else {
-            panic!("expected rescan")
-        };
-        assert!(
-            !controller.can_clean(),
-            "old snapshots cannot make a new Scan ready"
-        );
-        controller.apply(
-            latest,
-            Event::Scanned("discarded", ScanResult::Complete { bytes: 0 }, vec![3]),
-        );
-        controller.apply(
-            latest,
-            Event::Scanned("cache", ScanResult::Complete { bytes: 9 }, vec![4]),
-        );
-        controller.apply(
-            first,
-            Event::Scanned("discarded", ScanResult::Complete { bytes: 0 }, vec![99]),
-        );
-        controller.apply(latest, Event::Finished);
-        let Some(Command::Clean { targets, .. }) = controller.request_clean() else {
-            panic!("expected Clean")
-        };
-        assert_eq!(
-            targets,
-            [CleanTarget {
-                id: "discarded",
-                snapshot: vec![3]
-            }]
-        );
-    }
-
-    #[test]
-    fn manual_and_post_clean_rescans_estimate_only_current_reports() {
-        for clean_first in [false, true] {
-            let mut controller = loaded(temps);
-            let scan = scan_op(&mut controller);
-            controller.apply(scan, scanned("cache", ScanResult::Complete { bytes: 4 }));
-            controller.apply(scan, scanned("temp", ScanResult::Complete { bytes: 9 }));
-            controller.apply(scan, Event::Finished);
-            assert_eq!(controller.totals().selected_bytes, 13);
-
-            let rescan = if clean_first {
-                let Some(Command::Clean { op, .. }) = controller.request_clean() else {
-                    panic!("expected Clean")
-                };
-                controller.apply(op, Event::Cleaned("cache", cleaned(4)));
-                controller.apply(op, Event::Cleaned("temp", cleaned(9)));
-                let Some(Command::Scan { op, .. }) = controller.apply(op, Event::Finished) else {
-                    panic!("expected rescan")
-                };
-                op
-            } else {
-                scan_op(&mut controller)
-            };
-            assert!(controller.rows().iter().all(|row| row.scan.is_none()));
-            assert_eq!(controller.totals().complete_bytes, 0);
-            assert_eq!(controller.totals().selected_bytes, 0);
-
-            controller.apply(rescan, Event::Scanning("cache"));
-            assert_eq!(controller.scanning_target(), Some("cache"));
-            controller.apply(rescan, scanned("cache", ScanResult::Complete { bytes: 1 }));
-            assert_eq!(controller.scanning_target(), None);
-            assert_eq!(controller.totals().complete_bytes, 1);
-            assert_eq!(controller.totals().selected_bytes, 1);
-            assert!(
-                controller
-                    .rows()
-                    .iter()
-                    .find(|row| row.target.id == "temp")
-                    .unwrap()
-                    .scan
-                    .is_none()
-            );
-            assert!(!controller.can_clean(), "the Scan is still running");
-            assert_eq!(controller.request_clean(), None);
-
-            controller.apply(rescan, scanned("temp", ScanResult::Complete { bytes: 2 }));
-            assert_eq!(controller.totals().complete_bytes, 3);
-            assert_eq!(controller.totals().selected_bytes, 3);
-            assert_eq!(controller.apply(rescan, Event::Finished), None);
-            assert!(controller.can_clean());
-        }
-    }
-
-    #[test]
-    fn clean_uses_visible_selection_while_saving_and_close_suppresses_rescan() {
-        let mut controller = loaded(|target| target.id == "cache");
-        let scan = scan_op(&mut controller);
-        controller.apply(scan, scanned("cache", ScanResult::Complete { bytes: 2 }));
-        controller.apply(scan, scanned("temp", ScanResult::Complete { bytes: 3 }));
-        controller.apply(scan, Event::Finished);
-        assert!(controller.toggle("temp").is_some());
-        assert!(controller.can_clean());
-        let Some(Command::Clean { op, targets }) = controller.request_clean() else {
-            panic!("expected Clean")
-        };
-        assert_eq!(
-            targets.iter().map(|target| target.id).collect::<Vec<_>>(),
-            ["cache", "temp"]
-        );
-        assert_eq!(controller.close(), Some(Command::Stop(op)));
-        assert!(controller.toggle("cache").is_none());
-        assert_eq!(controller.apply(op, Event::Finished), None);
-        assert!(!controller.ready_to_exit());
-        controller.save_finished(Ok(()));
-        assert!(controller.ready_to_exit());
-    }
-
-    #[test]
-    fn late_results_cannot_overwrite_new_scan() {
-        let mut controller = loaded(|_| false);
-        let first = scan_op(&mut controller);
-        controller.apply(first, Event::Finished);
-        let second = scan_op(&mut controller);
-        controller.apply(first, scanned("cache", ScanResult::Complete { bytes: 99 }));
-        assert!(controller.rows()[0].scan.is_none());
-        assert_ne!(first, second);
-    }
-
-    #[test]
-    fn duplicate_requests_do_not_start_another_operation() {
-        let mut controller = loaded(temps);
-        let scan = scan_op(&mut controller);
-        assert!(controller.start_scan().is_none());
-        controller.apply(scan, scanned("cache", ScanResult::Complete { bytes: 2 }));
-        controller.apply(scan, scanned("temp", ScanResult::NotPresent));
-        assert_eq!(controller.request_clean(), None);
-        assert_eq!(controller.apply(scan, Event::Finished), None);
-        let Some(Command::Clean { op, targets }) = controller.request_clean() else {
-            panic!("expected Clean")
-        };
-        assert_eq!(
-            targets,
-            [CleanTarget {
-                id: "cache",
-                snapshot: vec![]
-            }]
-        );
-        assert!(controller.start_scan().is_none());
-        assert_eq!(controller.request_clean(), None);
-        controller.apply(op, Event::Finished);
-    }
-
-    #[test]
-    fn close_during_scan_waits_for_worker_to_stop() {
-        let mut controller = loaded(temps);
-        let scan = scan_op(&mut controller);
-        controller.apply(scan, scanned("cache", ScanResult::Complete { bytes: 2 }));
-        controller.apply(scan, scanned("temp", ScanResult::NotPresent));
-        assert_eq!(controller.close(), Some(Command::Stop(scan)));
-        assert!(!controller.ready_to_exit());
-        assert!(controller.toggle("cache").is_none());
-        assert_eq!(controller.apply(scan, Event::Finished), None);
-        assert!(controller.ready_to_exit());
-        assert_eq!(controller.request_clean(), None);
-        assert_eq!(controller.start_scan(), None);
-    }
-
-    #[test]
-    fn finished_clean_results_follow_worker_order_and_survive_rescan() {
-        let mut controller = loaded(temps);
-        let scan = scan_op(&mut controller);
-        for id in ["cache", "temp"] {
-            controller.apply(scan, scanned(id, ScanResult::Complete { bytes: 1 }));
-        }
-        controller.apply(scan, Event::Finished);
-        let Some(Command::Clean { op, .. }) = controller.request_clean() else {
-            panic!("expected Clean")
-        };
-        controller.apply(op, Event::Cleaned("temp", cleaned(2)));
-        controller.apply(op, Event::Cleaned("cache", cleaned(1)));
-        let Some(Command::Scan { op: rescan, .. }) = controller.apply(op, Event::Finished) else {
-            panic!("expected rescan")
-        };
-        assert_eq!(controller.last_clean(), Some(&[cleaned(2), cleaned(1)][..]));
-        controller.apply(rescan, scanned("cache", ScanResult::NotPresent));
-        assert_eq!(controller.last_clean().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn selection_is_locked_until_loaded() {
-        let mut controller = Controller::new(&TARGETS);
-        assert_eq!(controller.start_scan(), None);
-        assert!(controller.toggle("cache").is_none());
-        controller.load_selection(Err("unreadable".into()));
-        assert!(controller.rows().iter().all(|row| !row.selected));
-        assert!(controller.start_scan().is_some());
-    }
-
-    #[test]
-    fn failed_save_keeps_visible_selection_and_a_later_success_clears_the_error() {
-        let mut controller = loaded(temps);
-        assert!(controller.toggle("cache").is_some());
-        controller.save_finished(Err("disk full".into()));
-        assert!(!controller.rows()[0].selected);
-        assert_eq!(
-            controller.selection_error(),
-            Some("Selection could not be saved: disk full")
-        );
-        controller.toggle("build").unwrap();
-        controller.save_finished(Ok(()));
-        assert!(!controller.rows()[0].selected);
-        assert!(controller.rows()[3].selected);
-        assert!(controller.selection_error().is_none());
-    }
-
-    #[test]
-    fn rapid_edits_queue_current_choices_and_close_waits_for_every_write() {
-        let mut controller = loaded(temps);
-        let mut writes = Vec::new();
-        for id in ["cache", "temp", "build", "cache"] {
-            let choices = controller.toggle(id).unwrap();
-            assert_eq!(choices, controller.choices());
-            writes.push(choices);
-        }
-        let latest = writes.last().unwrap();
-        assert!(latest["cache"]);
-        assert!(!latest["temp"]);
-        assert!(latest["build"]);
-        controller.close();
-        for result in [
-            Ok(()),
-            Err("disk full".into()),
-            Ok(()),
-            Err("disk full".into()),
-        ] {
-            assert!(!controller.ready_to_exit());
-            controller.save_finished(result);
-            assert_eq!(&controller.choices(), latest);
-        }
-        assert!(controller.ready_to_exit());
-    }
-
-    #[test]
-    fn close_during_selection_load_waits_for_any_initial_save() {
-        let mut controller = Controller::new(&TARGETS);
-        controller.close();
-        assert!(!controller.ready_to_exit());
-        assert!(
-            controller
-                .load_selection(Ok(Loaded {
-                    choices: selection::defaults(&TARGETS),
-                    needs_save: true,
-                }))
-                .is_some()
-        );
-        assert!(!controller.ready_to_exit());
-        controller.save_finished(Ok(()));
-        assert!(controller.ready_to_exit());
-
-        let mut unreadable = Controller::new(&TARGETS);
-        unreadable.close();
-        assert!(!unreadable.ready_to_exit());
-        assert_eq!(unreadable.load_selection(Err("unreadable".into())), None);
-        assert!(unreadable.ready_to_exit());
-    }
-
-    #[test]
-    fn initial_save_failure_does_not_block_clean() {
-        let mut controller = Controller::new(&TARGETS);
-        let save = controller.load_selection(Ok(Loaded {
-            choices: selection::defaults(&TARGETS),
-            needs_save: true,
-        }));
-        assert_eq!(save, Some(selection::defaults(&TARGETS)));
-        let scan = scan_op(&mut controller);
-        controller.apply(scan, scanned("cache", ScanResult::Complete { bytes: 2 }));
-        controller.apply(scan, scanned("temp", ScanResult::NotPresent));
-        controller.apply(scan, scanned("discarded", ScanResult::NotPresent));
-        controller.apply(scan, Event::Finished);
-        assert!(controller.can_clean(), "pending saves do not block Clean");
-        controller.save_finished(Err("access denied".into()));
-        assert!(
-            controller.rows()[0].selected,
-            "the loaded Selection stays shown"
-        );
-        assert!(controller.can_clean());
-        assert_eq!(
-            controller.selection_error(),
-            Some("Selection could not be saved: access denied")
-        );
-        assert!(controller.request_clean().is_some());
-    }
-}
+mod tests;
