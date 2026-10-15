@@ -1,5 +1,4 @@
-//! The cleaner view's lifetime, system settings, and worker orchestration.
-//! Rendering, presentation, and control interaction live in focused child modules.
+//! Cleaner window lifetime, system settings, and worker coordination.
 
 mod controls;
 mod presentation;

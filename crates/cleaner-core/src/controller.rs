@@ -68,13 +68,13 @@ pub enum CleanProgress {
     Done(CleanResult),
 }
 
-/// Estimates and progress derived from the current rows in one pass.
+/// Current Scan estimates and Scan/Clean progress.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Summary {
     /// Sum of complete estimates; partial and unknown sizes are excluded.
     pub complete_bytes: u64,
-    /// Sum of complete selected estimates; unknown while selected results are pending
-    /// and no complete selected estimate has arrived (including a complete zero).
+    /// Complete selected bytes; `None` while selected results are pending
+    /// and none has a complete estimate.
     pub selected_bytes: Option<u64>,
     /// At least one visible selected Target is still waiting for its Scan result.
     pub selected_pending: bool,

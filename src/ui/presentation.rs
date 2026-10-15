@@ -1,4 +1,4 @@
-//! Text and row presentation derived from controller state; no worker or window effects.
+//! Header, row, and status text derived from controller state.
 
 use cleaner_core::controller::{CleanProgress, Row, Summary};
 use cleaner_core::results::{CleanStatus, ScanResult};

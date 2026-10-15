@@ -1,4 +1,4 @@
-//! Screen layout and accessible names, rendering the controller's current summary.
+//! Cleaner screen layout and accessible names.
 
 use std::rc::Rc;
 
